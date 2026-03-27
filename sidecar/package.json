@@ -1,0 +1,14 @@
+{
+  "name": "sidecar",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.mjs",
+  "type": "module",
+  "dependencies": {
+    "@discordjs/opus": "^0.10.0",
+    "@discordjs/voice": "^0.19.2",
+    "@snazzah/davey": "^0.1.10",
+    "discord.js": "^14.25.1",
+    "sodium-native": "^5.1.0"
+  }
+}

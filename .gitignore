@@ -1,0 +1,5 @@
+/bin/
+/vendor/
+node_modules/
+*.sock
+.env
