@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ogerverse/livekit-discord-bridge/pkg/ipc"
+	lk "github.com/ogerverse/livekit-discord-bridge/pkg/livekit"
 )
 
 const socketPath = "/tmp/discord-voice-bridge.sock"
@@ -20,26 +21,47 @@ func main() {
 	token := os.Getenv("DISCORD_BOT_TOKEN")
 	guildID := os.Getenv("DISCORD_GUILD_ID")
 	channelID := os.Getenv("DISCORD_CHANNEL_ID")
+	lkURL := os.Getenv("LIVEKIT_URL")
+	lkKey := os.Getenv("LIVEKIT_API_KEY")
+	lkSecret := os.Getenv("LIVEKIT_API_SECRET")
+	lkRoom := os.Getenv("LIVEKIT_ROOM")
 
 	if token == "" || guildID == "" || channelID == "" {
 		logger.Error("set DISCORD_BOT_TOKEN, DISCORD_GUILD_ID, DISCORD_CHANNEL_ID")
+		os.Exit(1)
+	}
+	if lkURL == "" || lkKey == "" || lkSecret == "" || lkRoom == "" {
+		logger.Error("set LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_ROOM")
 		os.Exit(1)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	if err := run(ctx, logger, token, guildID, channelID, lkURL, lkKey, lkSecret, lkRoom); err != nil {
+		logger.Error("bridge exited", slog.Any("err", err))
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, logger *slog.Logger, token, guildID, channelID, lkURL, lkKey, lkSecret, lkRoom string) error {
+	lkManager := lk.NewManager(lk.Config{
+		URL:       lkURL,
+		APIKey:    lkKey,
+		APISecret: lkSecret,
+		RoomName:  lkRoom,
+	}, logger)
+	defer lkManager.Close()
+
 	srv, err := ipc.NewServer(socketPath)
 	if err != nil {
-		logger.Error("failed to create IPC server", slog.Any("err", err))
-		os.Exit(1)
+		return err
 	}
 	defer srv.Close()
 
 	cmd, err := ipc.StartSidecar("sidecar", socketPath, token, guildID, channelID)
 	if err != nil {
-		logger.Error("failed to start sidecar", slog.Any("err", err))
-		os.Exit(1)
+		return err
 	}
 	defer func() {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
@@ -49,12 +71,12 @@ func main() {
 
 	conn, err := srv.Accept()
 	if err != nil {
-		logger.Error("failed to accept sidecar", slog.Any("err", err))
-		os.Exit(1)
+		return err
 	}
 	defer conn.Close()
 	logger.Info("sidecar connected")
 
+	// Shut down sidecar when context cancels
 	go func() {
 		<-ctx.Done()
 		logger.Info("shutting down")
@@ -63,49 +85,56 @@ func main() {
 		conn.Close()
 	}()
 
+	return bridgeLoop(ctx, logger, conn, lkManager, lkRoom)
+}
+
+func bridgeLoop(ctx context.Context, logger *slog.Logger, conn *ipc.Conn, lkManager *lk.Manager, lkRoom string) error {
 	var totalFrames int64
-	users := make(map[uint64]bool)
+	var errCount int64
 	startTime := time.Now()
 	lastStats := time.Now()
 
 	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
 		msg, err := conn.ReadMessage()
 		if err != nil {
 			select {
 			case <-ctx.Done():
+				return nil // expected during shutdown
 			default:
-				logger.Error("read error", slog.Any("err", err))
+				return err
 			}
-			return
 		}
 
 		switch msg.Type {
 		case ipc.MsgReady:
-			logger.Info("sidecar READY")
-		case ipc.MsgUserJoin:
-			if !users[msg.UserID] {
-				users[msg.UserID] = true
-				logger.Info("user joined", slog.Uint64("user", msg.UserID))
-			}
+			logger.Info("sidecar READY — bridge active", slog.String("livekit_room", lkRoom))
+
 		case ipc.MsgUserLeave:
-			delete(users, msg.UserID)
-			logger.Info("user left", slog.Uint64("user", msg.UserID))
+			lkManager.RemoveParticipant(msg.UserID)
+
 		case ipc.MsgAudioFromDiscord:
 			totalFrames++
-			if totalFrames%250 == 1 {
-				logger.Info("recv opus",
-					slog.Uint64("user", msg.UserID),
-					slog.Int("bytes", len(msg.Payload)),
-					slog.Int64("total", totalFrames),
-					slog.Float64("elapsed_s", time.Since(startTime).Seconds()),
-				)
+			if err := lkManager.WriteOpus(msg.UserID, msg.Payload); err != nil {
+				errCount++
+				if errCount%500 == 0 {
+					logger.Error("opus write failed",
+						slog.Uint64("user", msg.UserID),
+						slog.Int64("err_count", errCount),
+						slog.Any("err", err),
+					)
+				}
 			}
 		}
 
-		if time.Since(lastStats) > 5*time.Second {
+		if time.Since(lastStats) > 10*time.Second {
 			logger.Info("stats",
 				slog.Int64("frames", totalFrames),
-				slog.Int("users", len(users)),
 				slog.Float64("elapsed_s", time.Since(startTime).Seconds()),
 			)
 			lastStats = time.Now()

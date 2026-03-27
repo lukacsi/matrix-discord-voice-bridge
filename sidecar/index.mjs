@@ -72,17 +72,19 @@ async function main() {
   });
 
   // Connect to IPC socket
+  let connected = false;
   await new Promise((resolve, reject) => {
     ipcSocket = net.createConnection(SOCKET_PATH, () => {
+      connected = true;
       console.log('[sidecar] connected to IPC socket');
       resolve();
     });
     ipcSocket.on('error', (err) => {
-      if (!ipcSocket.destroyed) {
+      if (!connected) {
+        reject(err); // connection failed
+      } else {
         console.error(`[sidecar] IPC socket error: ${err.message}`);
         cleanup();
-      } else {
-        reject(err);
       }
     });
   });
