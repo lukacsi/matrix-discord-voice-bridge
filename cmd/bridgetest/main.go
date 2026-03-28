@@ -59,8 +59,6 @@ func main() {
 		<-ctx.Done()
 		logger.Info("shutting down")
 		_ = conn.WriteMessage(&ipc.Message{Type: ipc.MsgShutdown})
-		time.Sleep(500 * time.Millisecond)
-		conn.Close()
 	}()
 
 	var totalFrames int64

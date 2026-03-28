@@ -140,13 +140,11 @@ func run(ctx context.Context, logger *slog.Logger,
 		defer sub.Close()
 	}
 
-	// Shutdown
+	// Signal sidecar to shut down when context cancels
 	go func() {
 		<-ctx.Done()
 		logger.Info("shutting down")
 		_ = conn.WriteMessage(&ipc.Message{Type: ipc.MsgShutdown})
-		time.Sleep(500 * time.Millisecond)
-		conn.Close()
 	}()
 
 	return bridgeLoop(ctx, logger, conn, lkManager, signaller, id.RoomID(matrixRoomID), lkRoom)
