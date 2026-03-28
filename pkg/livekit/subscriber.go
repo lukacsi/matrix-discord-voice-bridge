@@ -192,7 +192,8 @@ func NewSubscriber(config Config, handler OpusFrameHandler, slogger *slog.Logger
 }
 
 func (s *Subscriber) onTrackSubscribed(track *webrtc.TrackRemote, _ *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
-	if strings.HasPrefix(rp.Identity(), "discord:") || rp.Identity() == "discord-bridge-listener" {
+	ident := rp.Identity()
+	if strings.HasPrefix(ident, "discord:") || strings.HasPrefix(ident, "@discord_") || ident == "discord-bridge-listener" {
 		return
 	}
 	if track.Kind() != webrtc.RTPCodecTypeAudio {

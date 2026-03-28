@@ -30,7 +30,7 @@ func main() {
 	}
 	at.SetVideoGrant(grant).
 		SetIdentity(fmt.Sprintf("listener-%d", time.Now().Unix())).
-		SetValidFor(time.Hour)
+		SetValidFor(24 * 30 * time.Hour) // 30 days
 
 	token, err := at.ToJWT()
 	if err != nil {

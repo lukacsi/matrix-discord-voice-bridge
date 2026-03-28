@@ -72,6 +72,7 @@ func (p *participant) close() {
 type Manager struct {
 	config       Config
 	logger       *slog.Logger
+	identityFunc IdentityFunc
 	mu           sync.Mutex
 	participants map[uint64]*participant
 	connecting   map[uint64]bool
@@ -85,6 +86,22 @@ func NewManager(config Config, logger *slog.Logger) *Manager {
 		participants: make(map[uint64]*participant),
 		connecting:   make(map[uint64]bool),
 	}
+}
+
+// IdentityFunc maps a Discord user ID to a LiveKit participant identity.
+type IdentityFunc func(discordUserID uint64) string
+
+// SetIdentityFunc sets the function used to compute LiveKit participant identities.
+// Must be called before any participants are created.
+func (m *Manager) SetIdentityFunc(fn IdentityFunc) {
+	m.identityFunc = fn
+}
+
+func (m *Manager) identity(userID uint64) string {
+	if m.identityFunc != nil {
+		return m.identityFunc(userID)
+	}
+	return fmt.Sprintf("discord:%d", userID)
 }
 
 // ensureParticipant creates a LiveKit participant if one doesn't exist.
@@ -101,7 +118,7 @@ func (m *Manager) ensureParticipant(userID uint64) error {
 	m.connecting[userID] = true
 	m.mu.Unlock()
 
-	identity := fmt.Sprintf("discord:%d", userID)
+	identity := m.identity(userID)
 
 	track, err := lksdk.NewLocalTrack(webrtc.RTPCodecCapability{
 		MimeType:  webrtc.MimeTypeOpus,
