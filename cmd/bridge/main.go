@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -75,6 +76,29 @@ func run(ctx context.Context, logger *slog.Logger, token, guildID, channelID, lk
 	}
 	defer conn.Close()
 	logger.Info("sidecar connected")
+
+	// Subscriber: LiveKit → Discord (mixed audio)
+	var reverseFrames atomic.Int64
+	lkConfig := lk.Config{URL: lkURL, APIKey: lkKey, APISecret: lkSecret, RoomName: lkRoom}
+	sub, err := lk.NewSubscriber(lkConfig, func(opusFrame []byte) error {
+		n := reverseFrames.Add(1)
+		if n%250 == 1 {
+			logger.Info("LK→Discord opus frame",
+				slog.Int("bytes", len(opusFrame)),
+				slog.Int64("total", n),
+			)
+		}
+		return conn.WriteMessage(&ipc.Message{
+			Type:    ipc.MsgAudioToDiscord,
+			UserID:  0,
+			Payload: opusFrame,
+		})
+	}, logger)
+	if err != nil {
+		logger.Warn("subscriber failed — reverse path disabled", slog.Any("err", err))
+	} else {
+		defer sub.Close()
+	}
 
 	// Shut down sidecar when context cancels
 	go func() {

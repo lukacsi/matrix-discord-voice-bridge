@@ -1,9 +1,15 @@
 import net from 'node:net';
+import { Readable } from 'node:stream';
 import { Client, GatewayIntentBits } from 'discord.js';
 import {
   joinVoiceChannel,
   VoiceConnectionStatus,
   entersState,
+  createAudioPlayer,
+  createAudioResource,
+  StreamType,
+  AudioPlayerStatus,
+  NoSubscriberBehavior,
 } from '@discordjs/voice';
 
 // IPC message types — must match pkg/ipc/protocol.go
@@ -14,7 +20,7 @@ const MSG_USER_LEAVE = 0x04;
 const MSG_READY = 0x05;
 const MSG_SHUTDOWN = 0x06;
 
-const SIDECAR_USER_ID = '0'; // sentinel for non-user messages
+const SIDECAR_USER_ID = '0';
 
 const SOCKET_PATH = process.env.IPC_SOCKET_PATH || '/tmp/discord-voice-bridge.sock';
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
@@ -60,11 +66,50 @@ class IPCReader {
   }
 }
 
+// --- Opus Stream for Discord Playback ---
+// Readable stream that receives raw Opus frames and feeds them to discord.js AudioPlayer.
+
+class OpusFrameStream extends Readable {
+  constructor() {
+    super({ objectMode: true });
+    this._frames = [];
+    this._reading = false;
+  }
+
+  pushFrame(opusFrame) {
+    // Keep max 5 frames (~100ms) to bound latency — drop oldest if full
+    while (this._frames.length >= 5) {
+      this._frames.shift();
+    }
+    this._frames.push(opusFrame);
+    if (this._reading) {
+      this._flush();
+    }
+  }
+
+  _flush() {
+    while (this._frames.length > 0) {
+      const frame = this._frames.shift();
+      if (!this.push(frame)) {
+        this._reading = false;
+        return;
+      }
+    }
+    this._reading = true;
+  }
+
+  _read() {
+    this._reading = true;
+    this._flush();
+  }
+}
+
 // --- Main ---
 
 let discordClient = null;
 let ipcSocket = null;
 let frameCount = 0;
+let opusStream = null;
 
 async function main() {
   discordClient = new Client({
@@ -81,7 +126,7 @@ async function main() {
     });
     ipcSocket.on('error', (err) => {
       if (!connected) {
-        reject(err); // connection failed
+        reject(err);
       } else {
         console.error(`[sidecar] IPC socket error: ${err.message}`);
         cleanup();
@@ -89,12 +134,21 @@ async function main() {
     });
   });
 
-  const ipcReader = new IPCReader((type, _userId, _payload) => {
+  // Set up Opus stream for Discord playback
+  opusStream = new OpusFrameStream();
+
+  let toDiscordFrames = 0;
+  const ipcReader = new IPCReader((type, _userId, payload) => {
     if (type === MSG_SHUTDOWN) {
       console.log('[sidecar] received shutdown');
       cleanup();
+    } else if (type === MSG_AUDIO_TO_DISCORD) {
+      toDiscordFrames++;
+      if (toDiscordFrames % 250 === 1) {
+        console.log(`[sidecar] LK→Discord opus frame: ${payload.length} bytes, total=${toDiscordFrames}`);
+      }
+      opusStream.pushFrame(Buffer.from(payload));
     }
-    // MSG_AUDIO_TO_DISCORD: not yet implemented (needs LiveKit mixer output)
   });
 
   ipcSocket.on('data', (data) => ipcReader.feed(data));
@@ -130,6 +184,22 @@ async function main() {
   await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
   console.log('[sidecar] voice connection ready');
 
+  // Audio player for sending mixed LiveKit audio to Discord
+  const player = createAudioPlayer({
+    behaviors: { noSubscriber: NoSubscriberBehavior.Play },
+  });
+  connection.subscribe(player);
+
+  const resource = createAudioResource(opusStream, {
+    inputType: StreamType.Opus,
+  });
+  player.play(resource);
+  console.log('[sidecar] audio player started (LiveKit → Discord)');
+
+  player.on('error', (err) => {
+    console.error(`[sidecar] player error: ${err.message}`);
+  });
+
   // Receive audio from Discord users
   const receiver = connection.receiver;
 
@@ -163,12 +233,13 @@ async function main() {
   const startTime = Date.now();
   setInterval(() => {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
-    console.log(`[sidecar] ${elapsed}s uptime, forwarded frames: ${frameCount}`);
+    console.log(`[sidecar] ${elapsed}s uptime, forwarded frames: ${frameCount}, player: ${player.state.status}`);
   }, 10_000);
 }
 
 function cleanup() {
   console.log('[sidecar] shutting down');
+  if (opusStream) opusStream.push(null); // end stream
   discordClient?.destroy();
   ipcSocket?.end();
   process.exit(0);
