@@ -15,6 +15,7 @@ import (
 
 	msdk "github.com/livekit/media-sdk"
 	"github.com/livekit/media-sdk/mixer"
+
 )
 
 const (
@@ -24,36 +25,6 @@ const (
 	opusFrameMs     = 20
 	samplesPerFrame = sampleRate * opusFrameMs / 1000 // 960
 )
-
-// softLimit applies a soft knee compressor to prevent hard clipping.
-// Below the threshold (25% of max), signal passes through unchanged.
-// Above threshold, signal is compressed with a 10:1 ratio.
-func softLimit(s int16) int16 {
-	const threshold int32 = 8192 // 25% of 32767
-	const ratio int32 = 10
-
-	x := int32(s)
-	abs := x
-	if abs < 0 {
-		abs = -abs
-	}
-
-	if abs <= threshold {
-		return s
-	}
-
-	excess := abs - threshold
-	compressed := threshold + excess/ratio
-
-	if compressed > 32767 {
-		compressed = 32767
-	}
-
-	if x < 0 {
-		return int16(-compressed)
-	}
-	return int16(compressed)
-}
 
 // OpusFrameHandler is called with each encoded Opus frame from the mixer.
 // Called from the mixer's goroutine — must be safe for concurrent use.
@@ -71,11 +42,11 @@ type trackEntry struct {
 type opusOutput struct {
 	encoder *opus.Encoder
 	mono    []int16
-	stereo  []int16
-	outBuf  []byte
-	pos     int
-	handler OpusFrameHandler
-	logger  *slog.Logger
+	stereo    []int16
+	outBuf    []byte
+	pos       int
+	handler   OpusFrameHandler
+	logger    *slog.Logger
 }
 
 func newOpusOutput(handler OpusFrameHandler, logger *slog.Logger) (*opusOutput, error) {
@@ -93,10 +64,10 @@ func newOpusOutput(handler OpusFrameHandler, logger *slog.Logger) (*opusOutput, 
 	return &opusOutput{
 		encoder: enc,
 		mono:    make([]int16, samplesPerFrame),
-		stereo:  make([]int16, samplesPerFrame*encodeChannels),
-		outBuf:  make([]byte, 4000),
-		handler: handler,
-		logger:  logger,
+		stereo:    make([]int16, samplesPerFrame*encodeChannels),
+		outBuf:    make([]byte, 4000),
+		handler:   handler,
+		logger:    logger,
 	}, nil
 }
 
@@ -111,11 +82,10 @@ func (o *opusOutput) WriteSample(sample msdk.PCM16Sample) error {
 		i += n
 
 		if o.pos >= samplesPerFrame {
-			// Mono → stereo with soft limiter
+			// Mono → stereo (duplicate to both channels)
 			for j := 0; j < samplesPerFrame; j++ {
-				s := softLimit(o.mono[j])
-				o.stereo[j*2] = s
-				o.stereo[j*2+1] = s
+				o.stereo[j*2] = o.mono[j]
+				o.stereo[j*2+1] = o.mono[j]
 			}
 
 			written, err := o.encoder.Encode(o.stereo, o.outBuf)

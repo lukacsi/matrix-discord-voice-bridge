@@ -11,6 +11,8 @@ import (
 	"github.com/pion/webrtc/v4/pkg/media"
 )
 
+const frameDuration = 20 * time.Millisecond
+
 // Config holds LiveKit connection parameters.
 type Config struct {
 	URL       string
@@ -19,53 +21,10 @@ type Config struct {
 	RoomName  string
 }
 
-const (
-	frameDuration = 20 * time.Millisecond
-	frameBuffer   = 10 // ~200ms of buffered frames
-)
-
 // participant represents a single Discord user bridged into LiveKit.
 type participant struct {
-	room   *lksdk.Room
-	track  *lksdk.LocalTrack
-	frames chan []byte
-	done   chan struct{}
-	wg     sync.WaitGroup
-}
-
-// paceWriter drains frames at a steady 20ms interval to prevent jitter.
-func (p *participant) paceWriter(logger *slog.Logger, userID uint64) {
-	defer p.wg.Done()
-	ticker := time.NewTicker(frameDuration)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-p.done:
-			return
-		case <-ticker.C:
-			select {
-			case frame := <-p.frames:
-				err := p.track.WriteSample(media.Sample{
-					Data:     frame,
-					Duration: frameDuration,
-				}, nil)
-				if err != nil {
-					logger.Warn("WriteSample error",
-						slog.Uint64("user", userID),
-						slog.Any("err", err),
-					)
-				}
-			default:
-				// no frame ready — silence gap, skip tick
-			}
-		}
-	}
-}
-
-func (p *participant) close() {
-	close(p.done)
-	p.wg.Wait() // wait for paceWriter to stop before disconnecting
-	p.room.Disconnect()
+	room  *lksdk.Room
+	track *lksdk.LocalTrack
 }
 
 // Manager manages LiveKit participants for bridged Discord users.
@@ -155,14 +114,7 @@ func (m *Manager) ensureParticipant(userID uint64) error {
 		return fmt.Errorf("publish track: %w", err)
 	}
 
-	p := &participant{
-		room:   room,
-		track:  track,
-		frames: make(chan []byte, frameBuffer),
-		done:   make(chan struct{}),
-	}
-	p.wg.Add(1)
-	go p.paceWriter(m.logger, userID)
+	p := &participant{room: room, track: track}
 
 	m.mu.Lock()
 	m.participants[userID] = p
@@ -182,7 +134,9 @@ func (m *Manager) clearConnecting(userID uint64) {
 	m.mu.Unlock()
 }
 
-// WriteOpus queues a raw Opus frame for paced delivery to LiveKit.
+// WriteOpus writes a raw Opus frame directly to the user's LiveKit track.
+// WriteSample handles RTP timing internally — no additional pacing needed.
+// Creates the participant lazily if it doesn't exist (first frame dropped during connect).
 func (m *Manager) WriteOpus(userID uint64, opusFrame []byte) error {
 	m.mu.Lock()
 	p, ok := m.participants[userID]
@@ -196,26 +150,14 @@ func (m *Manager) WriteOpus(userID uint64, opusFrame []byte) error {
 		p = m.participants[userID]
 		m.mu.Unlock()
 		if p == nil {
-			return nil
+			return nil // first frame dropped during connect
 		}
 	}
 
-	// Non-blocking send. Called from a single goroutine (bridgeLoop).
-	select {
-	case p.frames <- opusFrame:
-	default:
-		// buffer full — drop oldest frame to keep latency low
-		select {
-		case <-p.frames:
-		default:
-		}
-		select {
-		case p.frames <- opusFrame:
-		default:
-			// still full after drain — drop this frame
-		}
-	}
-	return nil
+	return p.track.WriteSample(media.Sample{
+		Data:     opusFrame,
+		Duration: frameDuration,
+	}, nil)
 }
 
 // RemoveParticipant disconnects a user's LiveKit participant.
@@ -228,7 +170,7 @@ func (m *Manager) RemoveParticipant(userID uint64) {
 	m.mu.Unlock()
 
 	if ok {
-		p.close()
+		p.room.Disconnect()
 		m.logger.Info("LiveKit participant disconnected", slog.Uint64("discord_user", userID))
 	}
 }
@@ -241,7 +183,7 @@ func (m *Manager) Close() {
 	m.mu.Unlock()
 
 	for userID, p := range participants {
-		p.close()
+		p.room.Disconnect()
 		m.logger.Info("LiveKit participant disconnected", slog.Uint64("discord_user", userID))
 	}
 }

@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ogerverse/livekit-discord-bridge/pkg/ipc"
+	"github.com/lukacsi/livekit-discord-bridge/pkg/ipc"
 )
 
 const socketPath = "/tmp/discord-voice-bridge.sock"

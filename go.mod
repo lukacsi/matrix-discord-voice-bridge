@@ -1,4 +1,4 @@
-module github.com/ogerverse/livekit-discord-bridge
+module github.com/lukacsi/livekit-discord-bridge
 
 go 1.26.1
 

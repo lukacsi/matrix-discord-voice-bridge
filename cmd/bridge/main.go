@@ -9,9 +9,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ogerverse/livekit-discord-bridge/pkg/ipc"
-	lk "github.com/ogerverse/livekit-discord-bridge/pkg/livekit"
-	mx "github.com/ogerverse/livekit-discord-bridge/pkg/matrix"
+	"github.com/lukacsi/livekit-discord-bridge/pkg/ipc"
+	lk "github.com/lukacsi/livekit-discord-bridge/pkg/livekit"
+	mx "github.com/lukacsi/livekit-discord-bridge/pkg/matrix"
 
 	"maunium.net/go/mautrix/id"
 )
