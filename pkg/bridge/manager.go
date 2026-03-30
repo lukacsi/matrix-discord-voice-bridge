@@ -263,7 +263,7 @@ func (m *Manager) startBridge(ctx context.Context, channelID uint64) {
 		m.mu.Unlock()
 		return
 	}
-	// Find a free sidecar slot
+	// Find a free sidecar slot (channelID == 0 means free, ^uint64(0) means dead)
 	slotIdx := -1
 	for i, s := range m.slots {
 		if s.channelID == 0 {
@@ -482,6 +482,31 @@ func (m *Manager) OnMatrixCallMember(ctx context.Context, roomID id.RoomID, user
 			m.mu.Unlock()
 		}
 	}
+}
+
+// HandleSlotDeath cleans up when a sidecar slot dies (process crash, IPC EOF).
+// Stops any active bridge on that slot and marks it unavailable.
+func (m *Manager) HandleSlotDeath(ctx context.Context, slotIdx int) {
+	m.mu.Lock()
+	// Find and stop any bridge using this slot
+	var channelToStop uint64
+	for ch, b := range m.activeBridges {
+		if b.SlotIndex == slotIdx {
+			channelToStop = ch
+			break
+		}
+	}
+	// Mark slot as dead by setting channelID to max (not 0, which means "free")
+	if slotIdx >= 0 && slotIdx < len(m.slots) {
+		m.slots[slotIdx].channelID = ^uint64(0) // sentinel: dead slot
+	}
+	m.mu.Unlock()
+
+	if channelToStop != 0 {
+		m.stopBridgeForChannel(ctx, channelToStop)
+	}
+
+	m.logger.Warn("sidecar slot died", slog.Int("slot", slotIdx))
 }
 
 // Stats returns current bridge statistics.

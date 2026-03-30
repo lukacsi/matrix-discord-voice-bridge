@@ -164,7 +164,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 					case <-ctx.Done():
 						return
 					default:
-						errCh <- fmt.Errorf("slot %d: %w", s.Index, err)
+						// Sidecar died — clean up this slot
+						mgr.HandleSlotDeath(ctx, s.Index)
+						if s.Primary {
+							// Primary sidecar is critical — bridge can't function without voice state
+							errCh <- fmt.Errorf("primary sidecar (slot %d) died: %w", s.Index, err)
+						}
 						return
 					}
 				}
