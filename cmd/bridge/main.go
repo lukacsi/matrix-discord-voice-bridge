@@ -129,7 +129,6 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		if err != nil {
 			return fmt.Errorf("sidecar %d accept: %w", i, err)
 		}
-		conn.SetReadTimeout(30 * time.Second)
 		conn.SetWriteTimeout(5 * time.Second)
 
 		slots = append(slots, &bridge.SidecarSlot{

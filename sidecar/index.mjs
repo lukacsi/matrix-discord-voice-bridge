@@ -56,7 +56,9 @@ const MSG_TYPE_NAMES = {
 };
 
 function writeMessage(socket, type, userId, payload) {
-  logTrace(`ipc send ${MSG_TYPE_NAMES[type] || type} user=${userId} len=${payload?.length || 0}`);
+  if (type !== MSG_AUDIO_FROM_DISCORD && type !== MSG_AUDIO_TO_DISCORD) {
+    logTrace(`ipc send ${MSG_TYPE_NAMES[type] || type} user=${userId} len=${payload?.length || 0}`);
+  }
   const userBuf = Buffer.alloc(8);
   userBuf.writeBigUInt64LE(BigInt(userId));
   const payloadBuf = payload || Buffer.alloc(0);
@@ -123,7 +125,9 @@ class IPCReader {
       const userId = this.buffer.readBigUInt64LE(1).toString();
       const payload = this.buffer.subarray(11, totalLen);
 
-      logTrace(`ipc recv ${MSG_TYPE_NAMES[type] || type} user=${userId} len=${payload.length}`);
+      if (type !== MSG_AUDIO_FROM_DISCORD && type !== MSG_AUDIO_TO_DISCORD) {
+        logTrace(`ipc recv ${MSG_TYPE_NAMES[type] || type} user=${userId} len=${payload.length}`);
+      }
       this.onMessage(type, userId, payload);
       this.buffer = this.buffer.subarray(totalLen);
     }
