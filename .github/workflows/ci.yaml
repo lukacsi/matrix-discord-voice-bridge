@@ -14,6 +14,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Install C dependencies
+        run: sudo apt-get update && sudo apt-get install -y libopus-dev libopusfile-dev libsoxr-dev
       - run: go vet ./...
       - run: go test -race -cover ./pkg/...
 
@@ -25,4 +27,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: CGO_ENABLED=0 go build -o bridge ./cmd/bridge
+      - name: Install C dependencies
+        run: sudo apt-get update && sudo apt-get install -y libopus-dev libopusfile-dev libsoxr-dev
+      - run: go build -o bridge ./cmd/bridge
