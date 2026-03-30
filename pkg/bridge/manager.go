@@ -418,6 +418,28 @@ func (m *Manager) OnMatrixCallMember(ctx context.Context, roomID id.RoomID, user
 			timer.Stop()
 			delete(m.stopTimers, channelID)
 		}
+		// If joining a DIFFERENT channel, immediately stop any other bridges
+		// this user is in and cancel their debounce timers. This frees slots
+		// so startBridge can use them (otherwise the 5s debounce blocks it).
+		for otherCh, users := range m.matrixUsers {
+			if otherCh == channelID {
+				continue
+			}
+			if _, inOther := users[userMXID]; inOther {
+				delete(users, userMXID)
+				if len(users) == 0 {
+					delete(m.matrixUsers, otherCh)
+				}
+				if timer := m.stopTimers[otherCh]; timer != nil {
+					timer.Stop()
+					delete(m.stopTimers, otherCh)
+				}
+				// Stop the old bridge outside the lock
+				m.mu.Unlock()
+				m.stopBridgeForChannel(ctx, otherCh)
+				m.mu.Lock()
+			}
+		}
 		// Check if this is a new join or just a state update (camera toggle, etc.)
 		alreadyTracked := false
 		if users := m.matrixUsers[channelID]; users != nil {
