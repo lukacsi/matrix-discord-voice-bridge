@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	lksdk "github.com/livekit/server-sdk-go/v2"
@@ -115,7 +114,6 @@ type Subscriber struct {
 	mixer  *mixer.Mixer
 	mu     sync.Mutex
 	tracks map[string]*trackEntry
-	errors atomic.Int64
 }
 
 // NewSubscriber creates a subscriber that mixes LiveKit audio into Opus frames.

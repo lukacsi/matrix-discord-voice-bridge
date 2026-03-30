@@ -19,10 +19,9 @@ func main() {
 
 	token := os.Getenv("DISCORD_BOT_TOKEN")
 	guildID := os.Getenv("DISCORD_GUILD_ID")
-	channelID := os.Getenv("DISCORD_CHANNEL_ID")
 
-	if token == "" || guildID == "" || channelID == "" {
-		logger.Error("set DISCORD_BOT_TOKEN, DISCORD_GUILD_ID, DISCORD_CHANNEL_ID")
+	if token == "" || guildID == "" {
+		logger.Error("set DISCORD_BOT_TOKEN, DISCORD_GUILD_ID")
 		os.Exit(1)
 	}
 
@@ -36,7 +35,7 @@ func main() {
 	}
 	defer srv.Close()
 
-	cmd, err := ipc.StartSidecar("sidecar", socketPath, token, guildID, channelID)
+	cmd, err := ipc.StartSidecar("sidecar", socketPath, token, guildID)
 	if err != nil {
 		logger.Error("failed to start sidecar", slog.Any("err", err))
 		os.Exit(1)

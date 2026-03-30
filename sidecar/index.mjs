@@ -8,8 +8,8 @@ import {
   createAudioPlayer,
   createAudioResource,
   StreamType,
-  AudioPlayerStatus,
   NoSubscriberBehavior,
+  getVoiceConnection,
 } from '@discordjs/voice';
 
 // IPC message types — must match pkg/ipc/protocol.go
@@ -19,16 +19,18 @@ const MSG_USER_JOIN = 0x03;
 const MSG_USER_LEAVE = 0x04;
 const MSG_READY = 0x05;
 const MSG_SHUTDOWN = 0x06;
+const MSG_JOIN_CHANNEL = 0x07;
+const MSG_LEAVE_CHANNEL = 0x08;
+const MSG_VOICE_STATE = 0x09;
 
 const SIDECAR_USER_ID = '0';
 
 const SOCKET_PATH = process.env.IPC_SOCKET_PATH || '/tmp/discord-voice-bridge.sock';
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const GUILD_ID = process.env.DISCORD_GUILD_ID;
-const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 
-if (!TOKEN || !GUILD_ID || !CHANNEL_ID) {
-  console.error('[sidecar] set DISCORD_BOT_TOKEN, DISCORD_GUILD_ID, DISCORD_CHANNEL_ID');
+if (!TOKEN || !GUILD_ID) {
+  console.error('[sidecar] set DISCORD_BOT_TOKEN, DISCORD_GUILD_ID');
   process.exit(1);
 }
 
@@ -41,6 +43,28 @@ function writeMessage(socket, type, userId, payload) {
   const lenBuf = Buffer.alloc(2);
   lenBuf.writeUInt16LE(payloadBuf.length);
   socket.write(Buffer.concat([Buffer.from([type]), userBuf, lenBuf, payloadBuf]));
+}
+
+function channelIdPayload(channelId) {
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64LE(BigInt(channelId));
+  return buf;
+}
+
+function readChannelId(payload) {
+  if (payload.length < 8) return null;
+  return payload.readBigUInt64LE(0).toString();
+}
+
+// VOICE_STATE payload: channel_id(8) + category_id(8) + name_len(2) + name(utf8)
+function voiceStatePayload(channelId, channelName, categoryId) {
+  const nameBuf = Buffer.from(channelName, 'utf8');
+  const buf = Buffer.alloc(8 + 8 + 2 + nameBuf.length);
+  buf.writeBigUInt64LE(BigInt(channelId || '0'), 0);
+  buf.writeBigUInt64LE(BigInt(categoryId || '0'), 8);
+  buf.writeUInt16LE(nameBuf.length, 16);
+  nameBuf.copy(buf, 18);
+  return buf;
 }
 
 class IPCReader {
@@ -67,7 +91,6 @@ class IPCReader {
 }
 
 // --- Opus Stream for Discord Playback ---
-// Readable stream that receives raw Opus frames and feeds them to discord.js AudioPlayer.
 
 class OpusFrameStream extends Readable {
   constructor() {
@@ -77,7 +100,6 @@ class OpusFrameStream extends Readable {
   }
 
   pushFrame(opusFrame) {
-    // Keep max 5 frames (~100ms) to bound latency — drop oldest if full
     while (this._frames.length >= 5) {
       this._frames.shift();
     }
@@ -109,11 +131,17 @@ class OpusFrameStream extends Readable {
 let discordClient = null;
 let ipcSocket = null;
 let frameCount = 0;
+let currentChannelId = null;
+let currentConnection = null;
+let currentPlayer = null;
 let opusStream = null;
 
 async function main() {
   discordClient = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildVoiceStates,
+    ],
   });
 
   // Connect to IPC socket
@@ -134,20 +162,21 @@ async function main() {
     });
   });
 
-  // Set up Opus stream for Discord playback
-  opusStream = new OpusFrameStream();
-
-  let toDiscordFrames = 0;
   const ipcReader = new IPCReader((type, _userId, payload) => {
     if (type === MSG_SHUTDOWN) {
       console.log('[sidecar] received shutdown');
       cleanup();
-    } else if (type === MSG_AUDIO_TO_DISCORD) {
-      toDiscordFrames++;
-      if (toDiscordFrames % 250 === 1) {
-        console.log(`[sidecar] LK→Discord opus frame: ${payload.length} bytes, total=${toDiscordFrames}`);
-      }
+    } else if (type === MSG_AUDIO_TO_DISCORD && opusStream) {
       opusStream.pushFrame(Buffer.from(payload));
+    } else if (type === MSG_JOIN_CHANNEL) {
+      const channelId = readChannelId(payload);
+      if (channelId) {
+        console.log(`[sidecar] JOIN_CHANNEL ${channelId}`);
+        joinChannel(channelId);
+      }
+    } else if (type === MSG_LEAVE_CHANNEL) {
+      console.log('[sidecar] LEAVE_CHANNEL');
+      leaveChannel();
     }
   });
 
@@ -172,35 +201,93 @@ async function main() {
     process.exit(1);
   }
 
-  // Join voice channel
+  // Watch voice state updates guild-wide
+  discordClient.on('voiceStateUpdate', (oldState, newState) => {
+    // Ignore bot's own voice state changes
+    if (newState.member?.user?.bot && newState.member.user.id === discordClient.user.id) return;
+
+    const userId = newState.id;
+
+    if (oldState.channelId !== newState.channelId) {
+      // User moved, joined, or left
+      const channelId = newState.channelId || '0';
+      const channel = newState.channel;
+      const payload = voiceStatePayload(channelId, channel?.name || '', channel?.parentId || '0');
+      writeMessage(ipcSocket, MSG_VOICE_STATE, userId, payload);
+
+      if (newState.channelId) {
+        console.log(`[sidecar] voice: ${userId} joined "${channel?.name}" (${newState.channelId}) category=${channel?.parentId}`);
+      } else {
+        console.log(`[sidecar] voice: ${userId} left voice`);
+      }
+    }
+  });
+
+  // Send initial voice states for users already in VCs
+  for (const [, state] of guild.voiceStates.cache) {
+    if (state.channelId && !state.member?.user?.bot) {
+      const channel = guild.channels.cache.get(state.channelId);
+      const payload = voiceStatePayload(state.channelId, channel?.name || '', channel?.parentId || '0');
+      writeMessage(ipcSocket, MSG_VOICE_STATE, state.id, payload);
+    }
+  }
+
+  writeMessage(ipcSocket, MSG_READY, SIDECAR_USER_ID, null);
+  console.log('[sidecar] sent READY — watching voice states');
+
+  // Stats
+  const startTime = Date.now();
+  setInterval(() => {
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+    console.log(`[sidecar] ${elapsed}s uptime, forwarded frames: ${frameCount}, channel: ${currentChannelId || 'none'}`);
+  }, 10_000);
+}
+
+async function joinChannel(channelId) {
+  if (currentChannelId === channelId) return;
+
+  // Leave current channel first
+  if (currentConnection) {
+    leaveChannel();
+  }
+
+  const guild = discordClient.guilds.cache.get(GUILD_ID);
+  if (!guild) return;
+
+  currentChannelId = channelId;
+
   const connection = joinVoiceChannel({
-    channelId: CHANNEL_ID,
+    channelId,
     guildId: GUILD_ID,
     selfDeaf: false,
     selfMute: false,
     adapterCreator: guild.voiceAdapterCreator,
   });
 
-  await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
-  console.log('[sidecar] voice connection ready');
+  try {
+    await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
+  } catch (err) {
+    console.error(`[sidecar] failed to join channel ${channelId}: ${err.message}`);
+    currentChannelId = null;
+    return;
+  }
 
-  // Audio player for sending mixed LiveKit audio to Discord
-  const player = createAudioPlayer({
+  currentConnection = connection;
+  console.log(`[sidecar] joined voice channel ${channelId}`);
+
+  // Audio player for sending mixed audio to Discord
+  currentPlayer = createAudioPlayer({
     behaviors: { noSubscriber: NoSubscriberBehavior.Play },
   });
-  connection.subscribe(player);
+  connection.subscribe(currentPlayer);
 
+  opusStream = new OpusFrameStream();
   const resource = createAudioResource(opusStream, {
     inputType: StreamType.Opus,
   });
-  player.play(resource);
-  console.log('[sidecar] audio player started (LiveKit → Discord)');
+  currentPlayer.play(resource);
 
-  player.on('error', (err) => {
-    console.error(`[sidecar] player error: ${err.message}`);
-  });
-
-  // Receive audio from Discord users
+  // Receive audio from Discord users in this channel
   const receiver = connection.receiver;
 
   receiver.speaking.on('start', (userId) => {
@@ -225,21 +312,31 @@ async function main() {
       });
     }
   });
+}
 
-  writeMessage(ipcSocket, MSG_READY, SIDECAR_USER_ID, null);
-  console.log('[sidecar] sent READY to bridge');
-
-  // Stats
-  const startTime = Date.now();
-  setInterval(() => {
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
-    console.log(`[sidecar] ${elapsed}s uptime, forwarded frames: ${frameCount}, player: ${player.state.status}`);
-  }, 10_000);
+function leaveChannel() {
+  if (currentConnection) {
+    currentConnection.destroy();
+    currentConnection = null;
+  }
+  if (currentPlayer) {
+    currentPlayer.stop();
+    currentPlayer = null;
+  }
+  if (opusStream) {
+    opusStream.push(null);
+    opusStream = null;
+  }
+  if (currentChannelId) {
+    console.log(`[sidecar] left voice channel ${currentChannelId}`);
+    currentChannelId = null;
+  }
+  frameCount = 0;
 }
 
 function cleanup() {
   console.log('[sidecar] shutting down');
-  if (opusStream) opusStream.push(null); // end stream
+  leaveChannel();
   discordClient?.destroy();
   ipcSocket?.end();
   process.exit(0);

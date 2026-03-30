@@ -212,7 +212,13 @@ func (s *Signaller) Intent(mxid id.UserID) *appservice.IntentAPI {
 	return s.as.Intent(mxid)
 }
 
-// Client returns a raw mautrix client for the bot user.
+// BotIntent returns an intent for the voice bridge bot user.
+func (s *Signaller) BotIntent() *appservice.IntentAPI {
+	botMXID := id.UserID(fmt.Sprintf("@discord_voice_bridge:%s", s.config.ServerName))
+	return s.as.Intent(botMXID)
+}
+
+// Client returns a raw mautrix client for the bridge bot user.
 func (s *Signaller) Client() *mautrix.Client {
-	return s.as.BotClient()
+	return s.BotIntent().Client
 }

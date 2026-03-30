@@ -19,6 +19,9 @@ const (
 	MsgUserLeave        byte = 0x04
 	MsgReady            byte = 0x05
 	MsgShutdown         byte = 0x06
+	MsgJoinChannel      byte = 0x07
+	MsgLeaveChannel     byte = 0x08
+	MsgVoiceState       byte = 0x09
 )
 
 // Message represents an IPC message from/to the sidecar.
@@ -119,14 +122,14 @@ func (s *Server) Close() error {
 }
 
 // StartSidecar launches the Node.js sidecar process.
-func StartSidecar(sidecarDir, socketPath, token, guildID, channelID string) (*exec.Cmd, error) {
+// Channel is no longer passed — sidecar waits for JOIN_CHANNEL via IPC.
+func StartSidecar(sidecarDir, socketPath, token, guildID string) (*exec.Cmd, error) {
 	cmd := exec.Command("node", "index.mjs")
 	cmd.Dir = sidecarDir
 	cmd.Env = append(os.Environ(),
 		"IPC_SOCKET_PATH="+socketPath,
 		"DISCORD_BOT_TOKEN="+token,
 		"DISCORD_GUILD_ID="+guildID,
-		"DISCORD_CHANNEL_ID="+channelID,
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
