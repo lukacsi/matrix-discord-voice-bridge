@@ -124,7 +124,9 @@ func (m *Manager) SetSidecarConfig(cfg SidecarConfig, onReady func(slot *Sidecar
 
 // AddBot hot-adds a new Discord bot token — starts a sidecar and creates a new slot.
 func (m *Manager) AddBot(ctx context.Context, token string) (int, error) {
-	slotIdx := len(m.slots) // next index
+	m.mu.Lock()
+	slotIdx := len(m.slots)
+	m.mu.Unlock()
 
 	socketPath := fmt.Sprintf("%s.%d", m.sidecarCfg.SocketBase, slotIdx)
 
@@ -370,7 +372,7 @@ func (m *Manager) HandleMessage(ctx context.Context, slotIdx int, msg *ipc.Messa
 		m.mu.Lock()
 		bridge := m.bridgeForSlot(slotIdx)
 		m.mu.Unlock()
-		if bridge != nil {
+		if bridge != nil && bridge.LKManager != nil {
 			if err := bridge.LKManager.WriteOpus(msg.UserID, msg.Payload); err != nil {
 				m.logger.Debug("WriteOpus error", slog.Uint64("discord_user", msg.UserID), slog.Any("err", err))
 			}
@@ -617,9 +619,9 @@ func (m *Manager) OnMatrixCallMember(ctx context.Context, roomID id.RoomID, user
 			timer.Stop()
 			delete(m.stopTimers, channelID)
 		}
-		// If joining a DIFFERENT channel, immediately stop any other bridges
-		// this user is in and cancel their debounce timers. This frees slots
-		// so startBridge can use them (otherwise the 5s debounce blocks it).
+		// If joining a DIFFERENT channel, collect channels to stop (can't drop
+		// lock inside range loop — concurrent map mutation race).
+		var channelsToStop []uint64
 		for otherCh, users := range m.matrixUsers {
 			if otherCh == channelID {
 				continue
@@ -633,28 +635,34 @@ func (m *Manager) OnMatrixCallMember(ctx context.Context, roomID id.RoomID, user
 					timer.Stop()
 					delete(m.stopTimers, otherCh)
 				}
-				// Stop the old bridge outside the lock
-				m.mu.Unlock()
-				m.stopBridgeForChannel(ctx, otherCh)
-				m.mu.Lock()
+				channelsToStop = append(channelsToStop, otherCh)
 			}
 		}
+		m.mu.Unlock()
+		for _, ch := range channelsToStop {
+			m.stopBridgeForChannel(ctx, ch)
+		}
+		m.mu.Lock()
 		// Check if this is a new join or just a state update (camera toggle, etc.)
 		alreadyTracked := false
 		if users := m.matrixUsers[channelID]; users != nil {
 			_, alreadyTracked = users[userMXID]
 		}
+		m.mu.Unlock()
+
 		if !alreadyTracked {
-			if m.matrixUsers[channelID] == nil {
-				m.matrixUsers[channelID] = make(map[string]string)
-			}
+			// Resolve display name outside the lock (HTTP call, up to 5s)
 			displayName := userMXID
 			if m.signaller != nil {
 				displayName = m.signaller.GetDisplayName(ctx, id.UserID(userMXID))
 			}
+			m.mu.Lock()
+			if m.matrixUsers[channelID] == nil {
+				m.matrixUsers[channelID] = make(map[string]string)
+			}
 			m.matrixUsers[channelID][userMXID] = displayName
+			m.mu.Unlock()
 		}
-		m.mu.Unlock()
 
 		if !alreadyTracked {
 			m.logger.Info("matrix user joined voice room",
@@ -709,6 +717,11 @@ func (m *Manager) OnMatrixCallMember(ctx context.Context, roomID id.RoomID, user
 // Stops any active bridge on that slot and marks it unavailable.
 func (m *Manager) HandleSlotDeath(ctx context.Context, slotIdx int) {
 	m.mu.Lock()
+	// Guard against double-death (RemoveBot + read loop EOF can both trigger)
+	if slotIdx >= 0 && slotIdx < len(m.slots) && m.slots[slotIdx].channelID == ^uint64(0) {
+		m.mu.Unlock()
+		return
+	}
 	// Find and stop any bridge using this slot
 	var channelToStop uint64
 	for ch, b := range m.activeBridges {
@@ -743,7 +756,7 @@ func (m *Manager) Stats() (activeBridges, busySlots, totalSlots, trackedUsers in
 	defer m.mu.Unlock()
 	activeBridges = len(m.activeBridges)
 	for _, s := range m.slots {
-		if s.channelID != 0 {
+		if s.channelID != 0 && s.channelID != ^uint64(0) {
 			busySlots++
 		}
 	}

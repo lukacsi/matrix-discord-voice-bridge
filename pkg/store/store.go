@@ -3,6 +3,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 
 	_ "modernc.org/sqlite"
@@ -166,7 +167,7 @@ func (s *Store) GetRoom(channelID uint64) (*Room, error) {
 	r := &Room{}
 	err := s.db.QueryRow("SELECT discord_channel, matrix_room, name, guild_id, category_id FROM rooms WHERE discord_channel = ?", channelID).
 		Scan(&r.DiscordChannel, &r.MatrixRoom, &r.Name, &r.GuildID, &r.CategoryID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
