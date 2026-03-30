@@ -84,6 +84,12 @@ func (s *Store) RemoveBot(id int64) error {
 	return err
 }
 
+// DeactivateBot marks a bot as inactive by token.
+func (s *Store) DeactivateBot(token string) error {
+	_, err := s.db.Exec("UPDATE bots SET active = 0 WHERE token = ?", token)
+	return err
+}
+
 // ListBots returns all bots for a guild.
 func (s *Store) ListBots(guildID string) ([]Bot, error) {
 	rows, err := s.db.Query("SELECT id, token, guild_id, active FROM bots WHERE guild_id = ?", guildID)

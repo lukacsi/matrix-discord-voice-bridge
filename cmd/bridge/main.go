@@ -132,7 +132,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config, levelVar 
 	var servers []*ipc.Server
 	var cmds []*os.Process
 
-	for i, token := range tokens {
+	for i, bot := range bots {
+		token := bot.Token
 		socketPath := fmt.Sprintf("%s.%d", cfg.Sidecar.SocketPath, i)
 		primary := i == 0
 
@@ -166,6 +167,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config, levelVar 
 			Index:   i,
 			Primary: primary,
 			Token:   masked,
+			BotDBID: bot.ID,
 		})
 
 		role := "audio"

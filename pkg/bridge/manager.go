@@ -37,6 +37,7 @@ type SidecarSlot struct {
 	Index   int
 	Primary bool
 	Token   string // masked bot token for display
+	BotDBID int64  // database row ID for deactivation
 
 	// Protected by Manager.mu
 	channelID uint64 // 0 = free
@@ -166,10 +167,13 @@ func (m *Manager) AddBot(ctx context.Context, token string) (int, error) {
 	m.slots = append(m.slots, slot)
 	m.mu.Unlock()
 
-	// Persist to DB
+	// Persist to DB and store the row ID
 	if m.store != nil {
-		if _, err := m.store.AddBot(token, m.guildID); err != nil {
+		dbID, err := m.store.AddBot(token, m.guildID)
+		if err != nil {
 			m.logger.Warn("failed to persist bot token", slog.Any("err", err))
+		} else {
+			slot.BotDBID = dbID
 		}
 	}
 
@@ -196,6 +200,13 @@ func (m *Manager) RemoveBot(ctx context.Context, slotIdx int) error {
 		return fmt.Errorf("slot %d is already dead", slotIdx)
 	}
 	m.mu.Unlock()
+
+	// Deactivate in DB so it's not loaded on next restart
+	if m.store != nil && slot.BotDBID > 0 {
+		if err := m.store.RemoveBot(slot.BotDBID); err != nil {
+			m.logger.Warn("failed to deactivate bot in DB", slog.Any("err", err))
+		}
+	}
 
 	// Stop any active bridge on this slot
 	m.HandleSlotDeath(ctx, slotIdx)
@@ -263,12 +274,14 @@ func (m *Manager) RebuildDB(ctx context.Context) (int, error) {
 			m.roomChannels[roomID] = chID
 			m.mu.Unlock()
 
-			_ = m.store.UpsertRoom(store.Room{
+			if err := m.store.UpsertRoom(store.Room{
 				DiscordChannel: chID,
 				MatrixRoom:     string(roomID),
 				Name:           name,
 				GuildID:        m.guildID,
-			})
+			}); err != nil {
+				m.logger.Warn("failed to persist room", slog.Uint64("discord_channel", chID), slog.Any("err", err))
+			}
 			found++
 		}
 	}
@@ -480,7 +493,7 @@ func (m *Manager) startBridge(ctx context.Context, channelID uint64) {
 	}
 
 	// Insert sentinel so concurrent calls see this channel as claimed
-	m.activeBridges[channelID] = &ChannelBridge{ChannelID: channelID, SlotIndex: slotIdx}
+	m.activeBridges[channelID] = &ChannelBridge{ChannelID: channelID, SlotIndex: slotIdx, JoinedUsers: make(map[uint64]bool)}
 	m.mu.Unlock()
 
 	lkConfig := m.lkConfig
@@ -544,21 +557,21 @@ func (m *Manager) stopBridgeForChannel(ctx context.Context, channelID uint64) {
 	}
 	delete(m.activeBridges, channelID)
 	// Release the sidecar slot (but don't overwrite dead sentinel)
+	// Capture slot pointer under lock to avoid slice reallocation race
+	var slot *SidecarSlot
 	if bridge.SlotIndex >= 0 && bridge.SlotIndex < len(m.slots) {
-		if m.slots[bridge.SlotIndex].channelID != ^uint64(0) {
-			m.slots[bridge.SlotIndex].channelID = 0
+		slot = m.slots[bridge.SlotIndex]
+		if slot.channelID != ^uint64(0) {
+			slot.channelID = 0
 		}
 	}
 	m.mu.Unlock()
 
 	// Tell sidecar to leave
-	if bridge.SlotIndex >= 0 && bridge.SlotIndex < len(m.slots) {
-		slot := m.slots[bridge.SlotIndex]
-		if slot.Conn != nil {
-			if err := slot.Conn.WriteMessage(&ipc.Message{Type: ipc.MsgLeaveChannel}); err != nil {
-				m.logger.Warn("failed to send LEAVE_CHANNEL to sidecar",
-					slog.Int("slot", bridge.SlotIndex), slog.Any("err", err))
-			}
+	if slot != nil && slot.Conn != nil {
+		if err := slot.Conn.WriteMessage(&ipc.Message{Type: ipc.MsgLeaveChannel}); err != nil {
+			m.logger.Warn("failed to send LEAVE_CHANNEL to sidecar",
+				slog.Int("slot", bridge.SlotIndex), slog.Any("err", err))
 		}
 	}
 
@@ -854,6 +867,10 @@ func (m *Manager) ManualLeave(ctx context.Context, name string) error {
 func (m *Manager) pushMatrixUsers(channelID uint64) {
 	m.mu.Lock()
 	bridge, exists := m.activeBridges[channelID]
+	var slot *SidecarSlot
+	if exists && bridge != nil && bridge.SlotIndex >= 0 && bridge.SlotIndex < len(m.slots) {
+		slot = m.slots[bridge.SlotIndex]
+	}
 	users := m.matrixUsers[channelID]
 	names := make([]string, 0, len(users))
 	for _, name := range users {
@@ -861,7 +878,7 @@ func (m *Manager) pushMatrixUsers(channelID uint64) {
 	}
 	m.mu.Unlock()
 
-	if !exists || bridge == nil {
+	if slot == nil {
 		return
 	}
 
@@ -879,8 +896,6 @@ func (m *Manager) pushMatrixUsers(channelID uint64) {
 		copy(payload[offset+2:], nameBytes)
 		offset += 2 + len(nameBytes)
 	}
-
-	slot := m.slots[bridge.SlotIndex]
 	if slot.Conn != nil {
 		if err := slot.Conn.WriteMessage(&ipc.Message{
 			Type:    ipc.MsgMatrixUsers,
@@ -940,13 +955,15 @@ func (m *Manager) ensureMatrixRoom(ctx context.Context, channelID uint64, info c
 	m.mu.Unlock()
 
 	if m.store != nil {
-		_ = m.store.UpsertRoom(store.Room{
+		if err := m.store.UpsertRoom(store.Room{
 			DiscordChannel: channelID,
 			MatrixRoom:     string(roomID),
 			Name:           info.name,
 			GuildID:        m.guildID,
 			CategoryID:     info.categoryID,
-		})
+		}); err != nil {
+			m.logger.Warn("failed to persist room", slog.Uint64("discord_channel", channelID), slog.Any("err", err))
+		}
 	}
 
 	m.logger.Info("created Matrix room",
@@ -1315,11 +1332,13 @@ func (m *Manager) DiscoverExistingRooms(ctx context.Context) error {
 
 		// Persist to DB for next startup
 		if m.store != nil {
-			_ = m.store.UpsertRoom(store.Room{
+			if err := m.store.UpsertRoom(store.Room{
 				DiscordChannel: r.channelID,
 				MatrixRoom:     string(r.roomID),
 				GuildID:        m.guildID,
-			})
+			}); err != nil {
+				m.logger.Warn("failed to persist room", slog.Uint64("discord_channel", r.channelID), slog.Any("err", err))
+			}
 		}
 	}
 
