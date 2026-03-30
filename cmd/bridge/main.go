@@ -42,9 +42,21 @@ func main() {
 	logLevel := flag.String("log-level", "", "log level: info, debug, trace")
 	flag.Parse()
 
-	// Start with INFO, reconfigure after config is loaded
+	var levelVar slog.LevelVar
+	levelVar.Set(slog.LevelInfo)
+
 	handler := &filterHandler{
-		inner: slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}),
+		inner: slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+			Level: &levelVar,
+			ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+				if a.Key == slog.LevelKey {
+					if l, ok := a.Value.Any().(slog.Level); ok && l == LevelTrace {
+						a.Value = slog.StringValue("TRACE")
+					}
+				}
+				return a
+			},
+		}),
 	}
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
@@ -60,32 +72,19 @@ func main() {
 		cfg.LogLevel = *logLevel
 	}
 	if cfg.LogLevel != "" {
-		level := parseLogLevel(cfg.LogLevel)
-		handler = &filterHandler{
-			inner: slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-				Level: level,
-				ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-					if a.Key == slog.LevelKey && a.Value.Any().(slog.Level) == LevelTrace {
-						a.Value = slog.StringValue("TRACE")
-					}
-					return a
-				},
-			}),
-		}
-		logger = slog.New(handler)
-		slog.SetDefault(logger)
+		levelVar.Set(parseLogLevel(cfg.LogLevel))
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	if err := run(ctx, logger, cfg); err != nil {
+	if err := run(ctx, logger, cfg, &levelVar); err != nil {
 		logger.Error("bridge exited", slog.Any("err", err))
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
+func run(ctx context.Context, logger *slog.Logger, cfg *config.Config, levelVar *slog.LevelVar) error {
 	tokens := cfg.Discord.Tokens()
 	logger.Info("starting bridge",
 		slog.Int("bot_count", len(tokens)),
@@ -131,10 +130,17 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		conn.SetWriteTimeout(5 * time.Second)
 
+		// Mask token for display: show first 10 chars + "..."
+		masked := token
+		if len(masked) > 10 {
+			masked = masked[:10] + "..."
+		}
+
 		slots = append(slots, &bridge.SidecarSlot{
 			Conn:    conn,
 			Index:   i,
 			Primary: primary,
+			Token:   masked,
 		})
 
 		role := "audio"
@@ -193,7 +199,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	}
 
 	// Start Matrix /sync loop + membership renewal
-	if err := signaller.StartSync(ctx, mgr.OnMatrixCallMember); err != nil {
+	// Command handler for Matrix DM admin interface
+	var cmdHandler *mx.CommandHandler
+	if len(cfg.Matrix.AdminUsers) > 0 {
+		cmdHandler = mx.NewCommandHandler(mgr, signaller, cfg.Matrix.AdminUsers, levelVar, cfg.Discord.GuildID, logger)
+		logger.Info("admin DM commands enabled", slog.Int("admins", len(cfg.Matrix.AdminUsers)))
+	}
+
+	if err := signaller.StartSync(ctx, mgr.OnMatrixCallMember, cmdHandler); err != nil {
 		return fmt.Errorf("start sync: %w", err)
 	}
 	signaller.StartRenewal(ctx)

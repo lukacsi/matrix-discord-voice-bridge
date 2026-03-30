@@ -41,10 +41,11 @@ type LiveKit struct {
 }
 
 type Matrix struct {
-	HomeserverURL string `yaml:"homeserver_url"`
-	ASToken       string `yaml:"as_token"`
-	ServerName    string `yaml:"server_name"`
-	LKJWTService  string `yaml:"lk_jwt_service_url"`
+	HomeserverURL string   `yaml:"homeserver_url"`
+	ASToken       string   `yaml:"as_token"`
+	ServerName    string   `yaml:"server_name"`
+	LKJWTService  string   `yaml:"lk_jwt_service_url"`
+	AdminUsers    []string `yaml:"admin_users"`
 }
 
 type Sidecar struct {
@@ -84,6 +85,11 @@ func Load(path string) (*Config, error) {
 	envOverride(&cfg.Sidecar.Dir, "SIDECAR_DIR")
 	envOverride(&cfg.Sidecar.SocketPath, "IPC_SOCKET_PATH")
 	envOverride(&cfg.LogLevel, "BRIDGE_LOG_LEVEL")
+
+	// Admin users: comma-separated env var
+	if v := os.Getenv("MATRIX_ADMIN_USERS"); v != "" {
+		cfg.Matrix.AdminUsers = strings.Split(v, ",")
+	}
 
 	// DISCORD_BOT_TOKENS env var: comma-separated list
 	if v := os.Getenv("DISCORD_BOT_TOKENS"); v != "" {

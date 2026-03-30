@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -429,7 +430,7 @@ type CallMemberHandler func(ctx context.Context, roomID id.RoomID, userMXID stri
 // StartSync begins a /sync loop as the voice bridge bot, watching for m.call.member
 // state events in voice rooms. Calls onCallMember for each event.
 // Runs in a background goroutine; cancel ctx to stop.
-func (s *Signaller) StartSync(ctx context.Context, onCallMember CallMemberHandler) error {
+func (s *Signaller) StartSync(ctx context.Context, onCallMember CallMemberHandler, cmdHandler *CommandHandler) error {
 	// Create a dedicated client for /sync — the appservice intent client has no Syncer.
 	// Must set AppServiceUserID so all requests include ?user_id= for the AS token.
 	botMXID := id.UserID(fmt.Sprintf("@discord_voice_bridge:%s", s.config.ServerName))
@@ -442,6 +443,20 @@ func (s *Signaller) StartSync(ctx context.Context, onCallMember CallMemberHandle
 	syncer, ok := client.Syncer.(*mautrix.DefaultSyncer)
 	if !ok {
 		return fmt.Errorf("unexpected Syncer type on mautrix client")
+	}
+
+	// Set bot profile (display name) if not already set
+	botIntent := s.BotIntent()
+	if err := botIntent.EnsureRegistered(ctx); err != nil {
+		s.logger.Debug("bot registration (may already exist)", slog.Any("err", err))
+	}
+	profile, err := botIntent.GetProfile(ctx, botMXID)
+	if err != nil || profile.DisplayName == "" {
+		if err := botIntent.SetDisplayName(ctx, "Voice Bridge"); err != nil {
+			s.logger.Warn("failed to set bot display name", slog.Any("err", err))
+		} else {
+			s.logger.Info("set bot display name to Voice Bridge")
+		}
 	}
 
 	// Only process events from incremental syncs (since != "").
@@ -476,6 +491,47 @@ func (s *Signaller) StartSync(ctx context.Context, onCallMember CallMemberHandle
 		}
 		onCallMember(ctx, evt.RoomID, string(evt.Sender), joined)
 	})
+
+	// Auto-join rooms when invited (needed for DM command rooms)
+	syncer.OnEventType(event.StateMember, func(_ context.Context, evt *event.Event) {
+		if evt.GetStateKey() == string(botMXID) {
+			mem := evt.Content.AsMember()
+			if mem != nil && mem.Membership == event.MembershipInvite {
+				botIntent := s.BotIntent()
+				if err := botIntent.EnsureJoined(ctx, evt.RoomID); err != nil {
+					s.logger.Warn("failed to auto-join room",
+						slog.String("matrix_room", string(evt.RoomID)), slog.Any("err", err))
+				} else {
+					s.logger.Info("auto-joined room",
+						slog.String("matrix_room", string(evt.RoomID)),
+						slog.String("invited_by", string(evt.Sender)))
+				}
+			}
+		}
+	})
+
+	// Handle DM commands from admin users
+	if cmdHandler != nil {
+		syncer.OnEventType(event.EventMessage, func(_ context.Context, evt *event.Event) {
+			if !initialSyncDone {
+				return
+			}
+			msg := evt.Content.AsMessage()
+			if msg == nil || !strings.HasPrefix(msg.Body, "!") {
+				return
+			}
+			if !cmdHandler.IsAdmin(string(evt.Sender)) {
+				return
+			}
+			reply := cmdHandler.Handle(ctx, evt.RoomID, string(evt.Sender), msg.Body)
+			if reply != "" {
+				botIntent := s.BotIntent()
+				if _, err := botIntent.SendText(ctx, evt.RoomID, reply); err != nil {
+					s.logger.Warn("failed to send command reply", slog.Any("err", err))
+				}
+			}
+		})
+	}
 
 	go func() {
 		backoff := 500 * time.Millisecond

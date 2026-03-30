@@ -19,6 +19,7 @@ import (
 	"github.com/lukacsi/livekit-discord-bridge/pkg/ipc"
 	lk "github.com/lukacsi/livekit-discord-bridge/pkg/livekit"
 	mx "github.com/lukacsi/livekit-discord-bridge/pkg/matrix"
+	"github.com/lukacsi/livekit-discord-bridge/pkg/types"
 )
 
 const bridgeProtocolID = "discord-voice"
@@ -34,6 +35,7 @@ type SidecarSlot struct {
 	Conn    *ipc.Conn
 	Index   int
 	Primary bool
+	Token   string // masked bot token for display
 
 	// Protected by Manager.mu
 	channelID uint64 // 0 = free
@@ -576,6 +578,90 @@ func (m *Manager) Stats() (activeBridges, busySlots, totalSlots, trackedUsers in
 	totalSlots = len(m.slots)
 	trackedUsers = len(m.voiceStates)
 	return
+}
+
+// ListRooms returns all known voice channel → Matrix room mappings.
+func (m *Manager) ListRooms() map[uint64]types.RoomInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make(map[uint64]types.RoomInfo, len(m.channelRooms))
+	for ch, room := range m.channelRooms {
+		info := m.channelInfos[ch]
+		result[ch] = types.RoomInfo{Name: info.name, RoomID: room}
+	}
+	return result
+}
+
+// ListSlots returns the status of all sidecar slots.
+func (m *Manager) ListSlots() []types.SlotInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([]types.SlotInfo, len(m.slots))
+	for i, s := range m.slots {
+		si := types.SlotInfo{Index: i, Token: s.Token}
+		switch {
+		case s.channelID == ^uint64(0):
+			si.Status = "dead"
+		case s.channelID == 0:
+			si.Status = "free"
+		default:
+			si.Status = "busy"
+			si.ChannelID = s.channelID
+			if info, ok := m.channelInfos[s.channelID]; ok {
+				si.ChannelName = info.name
+			}
+		}
+		result[i] = si
+	}
+	return result
+}
+
+// ManualJoin starts a bridge for a channel matched by name.
+func (m *Manager) ManualJoin(ctx context.Context, name string) error {
+	m.mu.Lock()
+	var channelID uint64
+	for ch, info := range m.channelInfos {
+		if strings.EqualFold(info.name, name) {
+			channelID = ch
+			break
+		}
+	}
+	m.mu.Unlock()
+	if channelID == 0 {
+		return fmt.Errorf("channel %q not found", name)
+	}
+	m.startBridge(ctx, channelID)
+	return nil
+}
+
+// ManualLeave stops a bridge for a channel matched by name, or all if empty.
+func (m *Manager) ManualLeave(ctx context.Context, name string) error {
+	if name == "" {
+		m.mu.Lock()
+		channels := make([]uint64, 0, len(m.activeBridges))
+		for ch := range m.activeBridges {
+			channels = append(channels, ch)
+		}
+		m.mu.Unlock()
+		for _, ch := range channels {
+			m.stopBridgeForChannel(ctx, ch)
+		}
+		return nil
+	}
+	m.mu.Lock()
+	var channelID uint64
+	for ch, info := range m.channelInfos {
+		if strings.EqualFold(info.name, name) {
+			channelID = ch
+			break
+		}
+	}
+	m.mu.Unlock()
+	if channelID == 0 {
+		return fmt.Errorf("channel %q not found", name)
+	}
+	m.stopBridgeForChannel(ctx, channelID)
+	return nil
 }
 
 // pushMatrixUsers sends the current list of Matrix user display names to the
