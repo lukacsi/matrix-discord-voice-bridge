@@ -180,13 +180,25 @@ func (m *Manager) HandleMessage(ctx context.Context, slotIdx int, msg *ipc.Messa
 		}
 		return true
 
+	case ipc.MsgLeaveChannel:
+		// Sidecar-initiated leave (e.g., join failure after retries)
+		m.mu.Lock()
+		bridge := m.bridgeForSlot(slotIdx)
+		m.mu.Unlock()
+		if bridge != nil {
+			m.logger.Warn("sidecar reported channel leave",
+				slog.Uint64("channel", bridge.ChannelID), slog.Int("slot", slotIdx))
+			go m.stopBridgeForChannel(ctx, bridge.ChannelID)
+		}
+		return true
+
 	case ipc.MsgAudioFromDiscord:
 		m.mu.Lock()
 		bridge := m.bridgeForSlot(slotIdx)
 		m.mu.Unlock()
 		if bridge != nil {
 			if err := bridge.LKManager.WriteOpus(msg.UserID, msg.Payload); err != nil {
-				// Silently drop
+				m.logger.Debug("WriteOpus error", slog.Uint64("user", msg.UserID), slog.Any("err", err))
 			}
 		}
 		return true
@@ -301,10 +313,13 @@ func (m *Manager) startBridge(ctx context.Context, channelID uint64) {
 	// Tell sidecar to join Discord VC IMMEDIATELY (don't wait for LiveKit)
 	payload := make([]byte, 8)
 	binary.LittleEndian.PutUint64(payload, channelID)
-	_ = slot.Conn.WriteMessage(&ipc.Message{
+	if err := slot.Conn.WriteMessage(&ipc.Message{
 		Type:    ipc.MsgJoinChannel,
 		Payload: payload,
-	})
+	}); err != nil {
+		m.logger.Error("failed to send JOIN_CHANNEL to sidecar",
+			slog.Int("slot", slotIdx), slog.Any("err", err))
+	}
 
 	// Connect to LiveKit in parallel with Discord join
 	lkManager := lk.NewManager(lkConfig, m.logger)
@@ -352,9 +367,11 @@ func (m *Manager) stopBridgeForChannel(ctx context.Context, channelID uint64) {
 		return
 	}
 	delete(m.activeBridges, channelID)
-	// Release the sidecar slot
+	// Release the sidecar slot (but don't overwrite dead sentinel)
 	if bridge.SlotIndex >= 0 && bridge.SlotIndex < len(m.slots) {
-		m.slots[bridge.SlotIndex].channelID = 0
+		if m.slots[bridge.SlotIndex].channelID != ^uint64(0) {
+			m.slots[bridge.SlotIndex].channelID = 0
+		}
 	}
 	m.mu.Unlock()
 
@@ -362,7 +379,10 @@ func (m *Manager) stopBridgeForChannel(ctx context.Context, channelID uint64) {
 	if bridge.SlotIndex >= 0 && bridge.SlotIndex < len(m.slots) {
 		slot := m.slots[bridge.SlotIndex]
 		if slot.Conn != nil {
-			_ = slot.Conn.WriteMessage(&ipc.Message{Type: ipc.MsgLeaveChannel})
+			if err := slot.Conn.WriteMessage(&ipc.Message{Type: ipc.MsgLeaveChannel}); err != nil {
+				m.logger.Warn("failed to send LEAVE_CHANNEL to sidecar",
+					slog.Int("slot", bridge.SlotIndex), slog.Any("err", err))
+			}
 		}
 	}
 
@@ -379,9 +399,14 @@ func (m *Manager) stopBridgeForChannel(ctx context.Context, channelID uint64) {
 	)
 }
 
-// Close stops all active bridges and cleans up Matrix presence.
+// Close stops all active bridges, cancels timers, and cleans up Matrix presence.
 func (m *Manager) Close(ctx context.Context) {
 	m.mu.Lock()
+	// Cancel all pending debounce timers
+	for ch, timer := range m.stopTimers {
+		timer.Stop()
+		delete(m.stopTimers, ch)
+	}
 	channels := make([]uint64, 0, len(m.activeBridges))
 	for ch := range m.activeBridges {
 		channels = append(channels, ch)
@@ -518,6 +543,13 @@ func (m *Manager) HandleSlotDeath(ctx context.Context, slotIdx int) {
 			break
 		}
 	}
+	// Cancel any pending debounce timer for this channel
+	if channelToStop != 0 {
+		if timer := m.stopTimers[channelToStop]; timer != nil {
+			timer.Stop()
+			delete(m.stopTimers, channelToStop)
+		}
+	}
 	// Mark slot as dead by setting channelID to max (not 0, which means "free")
 	if slotIdx >= 0 && slotIdx < len(m.slots) {
 		m.slots[slotIdx].channelID = ^uint64(0) // sentinel: dead slot
@@ -579,10 +611,13 @@ func (m *Manager) pushMatrixUsers(channelID uint64) {
 
 	slot := m.slots[bridge.SlotIndex]
 	if slot.Conn != nil {
-		_ = slot.Conn.WriteMessage(&ipc.Message{
+		if err := slot.Conn.WriteMessage(&ipc.Message{
 			Type:    ipc.MsgMatrixUsers,
 			Payload: payload,
-		})
+		}); err != nil {
+			m.logger.Warn("failed to push matrix users to sidecar",
+				slog.Int("slot", bridge.SlotIndex), slog.Any("err", err))
+		}
 	}
 }
 

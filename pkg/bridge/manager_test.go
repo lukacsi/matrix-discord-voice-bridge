@@ -6,6 +6,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"maunium.net/go/mautrix/id"
 
@@ -23,6 +24,7 @@ func newTestManager() *Manager {
 		roomChannels:   make(map[id.RoomID]uint64),
 		categorySpaces: make(map[uint64]id.RoomID),
 		activeBridges:  make(map[uint64]*ChannelBridge),
+		stopTimers:     make(map[uint64]*time.Timer),
 	}
 }
 
@@ -473,4 +475,124 @@ func TestStopBridgeForChannelCorrectChannel(t *testing.T) {
 func TestStopBridgeForChannelNoBridge(t *testing.T) {
 	m := newTestManager()
 	m.stopBridgeForChannel(nil, 500)
+}
+
+// --- HandleSlotDeath ---
+
+func TestHandleSlotDeathStopsBridge(t *testing.T) {
+	m := newTestManager()
+	m.slots = []*SidecarSlot{{Index: 0, channelID: 500}, {Index: 1, channelID: 600}}
+	m.activeBridges[500] = &ChannelBridge{ChannelID: 500, SlotIndex: 0, JoinedUsers: make(map[uint64]bool)}
+	m.activeBridges[600] = &ChannelBridge{ChannelID: 600, SlotIndex: 1, JoinedUsers: make(map[uint64]bool)}
+
+	m.HandleSlotDeath(nil, 0)
+
+	m.mu.Lock()
+	_, has500 := m.activeBridges[500]
+	_, has600 := m.activeBridges[600]
+	slotDead := m.slots[0].channelID == ^uint64(0)
+	m.mu.Unlock()
+
+	if has500 {
+		t.Error("bridge 500 should have been stopped")
+	}
+	if !has600 {
+		t.Error("bridge 600 should still be active")
+	}
+	if !slotDead {
+		t.Error("slot 0 should be marked dead")
+	}
+}
+
+func TestHandleSlotDeathCancelsTimer(t *testing.T) {
+	m := newTestManager()
+	m.slots = []*SidecarSlot{{Index: 0, channelID: 500}}
+	m.activeBridges[500] = &ChannelBridge{ChannelID: 500, SlotIndex: 0, JoinedUsers: make(map[uint64]bool)}
+	m.stopTimers[500] = time.AfterFunc(1*time.Hour, func() {})
+
+	m.HandleSlotDeath(nil, 0)
+
+	m.mu.Lock()
+	_, hasTimer := m.stopTimers[500]
+	m.mu.Unlock()
+
+	if hasTimer {
+		t.Error("timer for channel 500 should have been cancelled")
+	}
+}
+
+// --- Close ---
+
+func TestCloseStopsTimersAndBridges(t *testing.T) {
+	m := newTestManager()
+	m.activeBridges[500] = &ChannelBridge{ChannelID: 500, SlotIndex: -1, JoinedUsers: make(map[uint64]bool)}
+	m.activeBridges[600] = &ChannelBridge{ChannelID: 600, SlotIndex: -1, JoinedUsers: make(map[uint64]bool)}
+	m.stopTimers[500] = time.AfterFunc(1*time.Hour, func() {})
+	m.stopTimers[600] = time.AfterFunc(1*time.Hour, func() {})
+
+	m.Close(nil)
+
+	m.mu.Lock()
+	bridgeCount := len(m.activeBridges)
+	timerCount := len(m.stopTimers)
+	m.mu.Unlock()
+
+	if bridgeCount != 0 {
+		t.Errorf("expected 0 bridges, got %d", bridgeCount)
+	}
+	if timerCount != 0 {
+		t.Errorf("expected 0 timers, got %d", timerCount)
+	}
+}
+
+// --- Stats ---
+
+func TestStats(t *testing.T) {
+	m := newTestManager()
+	m.slots = []*SidecarSlot{{Index: 0, channelID: 500}, {Index: 1}}
+	m.activeBridges[500] = &ChannelBridge{ChannelID: 500, SlotIndex: 0}
+	m.voiceStates[1] = 500
+	m.voiceStates[2] = 500
+	m.voiceStates[3] = 600
+
+	bridges, busy, total, users := m.Stats()
+
+	if bridges != 1 {
+		t.Errorf("active_bridges = %d, want 1", bridges)
+	}
+	if busy != 1 {
+		t.Errorf("slots_busy = %d, want 1", busy)
+	}
+	if total != 2 {
+		t.Errorf("slots_total = %d, want 2", total)
+	}
+	if users != 3 {
+		t.Errorf("discord_users = %d, want 3", users)
+	}
+}
+
+// --- HandleMessage MsgLeaveChannel from sidecar ---
+
+func TestHandleMessageSidecarLeave(t *testing.T) {
+	m := newTestManager()
+	m.slots = []*SidecarSlot{{Index: 0}}
+	m.activeBridges[500] = &ChannelBridge{ChannelID: 500, SlotIndex: 0, JoinedUsers: make(map[uint64]bool)}
+
+	msg := &ipc.Message{Type: ipc.MsgLeaveChannel}
+	handled := m.HandleMessage(nil, 0, msg)
+
+	if !handled {
+		t.Error("MsgLeaveChannel should be handled")
+	}
+
+	// stopBridgeForChannel runs in a goroutine — wait briefly
+	time.Sleep(50 * time.Millisecond)
+
+	m.mu.Lock()
+	count := len(m.activeBridges)
+	m.mu.Unlock()
+
+	if count != 0 {
+		t.Errorf("expected 0 active bridges after sidecar leave, got %d", count)
+	}
 }

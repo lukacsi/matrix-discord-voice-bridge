@@ -46,7 +46,7 @@ func main() {
 	}()
 	logger.Info("sidecar started", slog.Int("pid", cmd.Process.Pid))
 
-	conn, err := srv.Accept()
+	conn, err := srv.Accept(30 * time.Second)
 	if err != nil {
 		logger.Error("failed to accept sidecar", slog.Any("err", err))
 		os.Exit(1)

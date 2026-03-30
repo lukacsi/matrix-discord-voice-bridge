@@ -84,10 +84,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		cmds = append(cmds, cmd.Process)
 
-		conn, err := srv.Accept()
+		conn, err := srv.Accept(30 * time.Second)
 		if err != nil {
 			return fmt.Errorf("sidecar %d accept: %w", i, err)
 		}
+		conn.SetReadTimeout(30 * time.Second)
+		conn.SetWriteTimeout(5 * time.Second)
 
 		slots = append(slots, &bridge.SidecarSlot{
 			Conn:    conn,
@@ -106,11 +108,25 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		)
 	}
 
-	// Cleanup all sidecars on exit
+	// Cleanup all sidecars on exit — bounded shutdown
 	defer func() {
 		for _, p := range cmds {
 			_ = p.Signal(syscall.SIGTERM)
-			_, _ = p.Wait()
+		}
+		done := make(chan struct{})
+		go func() {
+			for _, p := range cmds {
+				_, _ = p.Wait()
+			}
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			logger.Warn("sidecars did not exit in time, sending SIGKILL")
+			for _, p := range cmds {
+				_ = p.Signal(syscall.SIGKILL)
+			}
 		}
 		for _, s := range servers {
 			s.Close()
@@ -190,6 +206,19 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}(slot)
 	}
 
+	// Monitor sidecar processes — detect crashes before IPC EOF
+	for i, proc := range cmds {
+		go func(idx int, p *os.Process) {
+			state, _ := p.Wait()
+			if ctx.Err() == nil { // not a graceful shutdown
+				logger.Error("sidecar process exited unexpectedly",
+					slog.Int("slot", idx),
+					slog.String("state", state.String()),
+				)
+			}
+		}(i, proc)
+	}
+
 	// Stats
 	go func() {
 		startTime := time.Now()
@@ -213,12 +242,33 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	// Wait for shutdown or error
 	select {
 	case <-ctx.Done():
-		wg.Wait()
-		return nil
 	case err := <-errCh:
-		wg.Wait()
+		// Close all connections to unblock read loops
+		for _, slot := range slots {
+			slot.Conn.Close()
+		}
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			logger.Warn("timed out waiting for read loops to exit")
+		}
 		return err
 	}
+
+	// Graceful shutdown: close connections to unblock readers
+	for _, slot := range slots {
+		slot.Conn.Close()
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		logger.Warn("timed out waiting for read loops to exit")
+	}
+	return nil
 }
 
 // filterHandler drops noisy pion/WebRTC and LiveKit internal logs.

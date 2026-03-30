@@ -159,6 +159,8 @@ let currentConnection = null;
 let currentPlayer = null;
 let opusStream = null;
 let originalNickname = null;
+let leavingChannel = false;
+let statsInterval = null;
 
 // Parse MSG_MATRIX_USERS payload and update bot nickname to show connected Matrix users.
 // Payload: count(2) + [nameLen(2) + name(utf8)]*
@@ -312,7 +314,7 @@ async function main() {
 
   // Stats — log every 60s to avoid spam
   const startTime = Date.now();
-  setInterval(() => {
+  statsInterval = setInterval(() => {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
     console.log(`[sidecar] ${elapsed}s uptime, frames: ${frameCount}, channel: ${currentChannelId || 'none'}`);
   }, 60_000);
@@ -321,38 +323,61 @@ async function main() {
 async function joinChannel(channelId) {
   if (currentChannelId === channelId) return;
 
-  // Leave current channel first
+  // Leave current channel first — wait briefly for cleanup to settle
   if (currentConnection) {
     leaveChannel();
+    await new Promise((r) => setTimeout(r, 500));
   }
 
   const guild = discordClient.guilds.cache.get(GUILD_ID);
   if (!guild) return;
 
-  currentChannelId = channelId;
+  // Retry up to 3 times with increasing delay
+  const maxRetries = 3;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    // Destroy any stale guild voice connection
+    const existing = getVoiceConnection(GUILD_ID);
+    if (existing) {
+      try { existing.destroy(); } catch (_) {}
+      await new Promise((r) => setTimeout(r, 300));
+    }
 
-  const connection = joinVoiceChannel({
-    channelId,
-    guildId: GUILD_ID,
-    selfDeaf: false,
-    selfMute: false,
-    adapterCreator: guild.voiceAdapterCreator,
-  });
+    currentChannelId = channelId;
 
-  // Handle connection errors to prevent unhandled 'error' crash
-  connection.on('error', (err) => {
-    console.error(`[sidecar] voice connection error: ${err.message}`);
-    leaveChannel();
-  });
+    const connection = joinVoiceChannel({
+      channelId,
+      guildId: GUILD_ID,
+      selfDeaf: false,
+      selfMute: false,
+      adapterCreator: guild.voiceAdapterCreator,
+    });
 
-  try {
-    await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
-  } catch (err) {
-    console.error(`[sidecar] failed to join channel ${channelId}: ${err.message}`);
-    connection.destroy();
-    currentChannelId = null;
-    return;
+    connection.on('error', (err) => {
+      console.error(`[sidecar] voice connection error: ${err.message}`);
+      leaveChannel();
+    });
+
+    try {
+      await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
+    } catch (err) {
+      console.error(`[sidecar] join attempt ${attempt}/${maxRetries} failed for ${channelId}: ${err.message}`);
+      try { connection.destroy(); } catch (_) {}
+      currentChannelId = null;
+      if (attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+      // Signal Go bridge that join failed — it will clean up bridge state
+      writeMessage(ipcSocket, MSG_LEAVE_CHANNEL, SIDECAR_USER_ID, null);
+      return;
+    }
+
+    // Success
+    currentConnection = connection;
+    break;
   }
+
+  if (!currentConnection) return;
 
   currentConnection = connection;
   console.log(`[sidecar] joined voice channel ${channelId}`);
@@ -405,6 +430,9 @@ async function joinChannel(channelId) {
 }
 
 function leaveChannel() {
+  if (leavingChannel) return;
+  leavingChannel = true;
+
   if (currentConnection) {
     try { currentConnection.destroy(); } catch (_) {}
     currentConnection = null;
@@ -430,10 +458,12 @@ function leaveChannel() {
       guild.members.me.setNickname(originalNickname).catch(() => {});
     }
   }
+  leavingChannel = false;
 }
 
 function cleanup() {
   console.log('[sidecar] shutting down');
+  if (statsInterval) clearInterval(statsInterval);
   leaveChannel();
   discordClient?.destroy();
   ipcSocket?.end();

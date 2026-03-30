@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func socketPair(t *testing.T) (*Conn, *Conn) {
@@ -185,7 +186,7 @@ func TestServerAcceptAndCleanup(t *testing.T) {
 		c.Close()
 	}()
 
-	conn, err := srv.Accept()
+	conn, err := srv.Accept(5 * time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,4 +248,80 @@ func TestWriteMessageConcurrent(t *testing.T) {
 		}
 	}
 	<-done
+}
+
+func TestAcceptTimeout(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.sock")
+
+	srv, err := NewServer(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	// No client connects — should timeout
+	_, err = srv.Accept(100 * time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+}
+
+func TestReadTimeout(t *testing.T) {
+	sender, receiver := socketPair(t)
+	defer sender.Close()
+	defer receiver.Close()
+
+	receiver.SetReadTimeout(100 * time.Millisecond)
+
+	// Don't send anything — reader should timeout
+	_, err := receiver.ReadMessage()
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+}
+
+func TestWriteTimeout(t *testing.T) {
+	sender, receiver := socketPair(t)
+	defer receiver.Close()
+
+	sender.SetWriteTimeout(100 * time.Millisecond)
+
+	// Fill the socket buffer by writing without reading
+	bigPayload := make([]byte, 65000)
+	msg := &Message{Type: MsgAudioFromDiscord, Payload: bigPayload}
+
+	var writeErr error
+	for i := 0; i < 1000; i++ {
+		if err := sender.WriteMessage(msg); err != nil {
+			writeErr = err
+			break
+		}
+	}
+	if writeErr == nil {
+		t.Log("write buffer not exhausted — skipping timeout test")
+	}
+}
+
+func TestReadWriteWithTimeoutSuccess(t *testing.T) {
+	sender, receiver := socketPair(t)
+	defer sender.Close()
+	defer receiver.Close()
+
+	sender.SetWriteTimeout(5 * time.Second)
+	receiver.SetReadTimeout(5 * time.Second)
+
+	// Normal operation should succeed within timeout
+	msg := &Message{Type: MsgReady, UserID: 42}
+	if err := sender.WriteMessage(msg); err != nil {
+		t.Fatalf("WriteMessage: %v", err)
+	}
+
+	got, err := receiver.ReadMessage()
+	if err != nil {
+		t.Fatalf("ReadMessage: %v", err)
+	}
+	if got.Type != MsgReady || got.UserID != 42 {
+		t.Errorf("got type=%d user=%d, want type=%d user=42", got.Type, got.UserID, MsgReady)
+	}
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 // Message types for the sidecar IPC protocol.
@@ -38,13 +39,25 @@ type Message struct {
 // ReadMessage must be called from a single goroutine.
 // WriteMessage is safe for concurrent use.
 type Conn struct {
-	conn net.Conn
-	mu   sync.Mutex // protects writes only
+	conn         net.Conn
+	mu           sync.Mutex    // protects writes only
+	readTimeout  time.Duration // 0 = no timeout
+	writeTimeout time.Duration // 0 = no timeout
 }
+
+// SetReadTimeout sets the deadline applied before each ReadMessage.
+func (c *Conn) SetReadTimeout(d time.Duration) { c.readTimeout = d }
+
+// SetWriteTimeout sets the deadline applied before each WriteMessage.
+func (c *Conn) SetWriteTimeout(d time.Duration) { c.writeTimeout = d }
 
 // ReadMessage reads one IPC message from the connection.
 // Not safe for concurrent use — call from a single goroutine.
 func (c *Conn) ReadMessage() (*Message, error) {
+	if c.readTimeout > 0 {
+		c.conn.SetReadDeadline(time.Now().Add(c.readTimeout))
+	}
+
 	header := make([]byte, 11)
 	if _, err := io.ReadFull(c.conn, header); err != nil {
 		return nil, fmt.Errorf("read header: %w", err)
@@ -70,6 +83,10 @@ func (c *Conn) ReadMessage() (*Message, error) {
 func (c *Conn) WriteMessage(msg *Message) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if c.writeTimeout > 0 {
+		c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
+	}
 
 	header := make([]byte, 11)
 	header[0] = msg.Type
@@ -113,11 +130,16 @@ func NewServer(socketPath string) (*Server, error) {
 	return &Server{listener: l, path: socketPath}, nil
 }
 
-// Accept waits for the sidecar to connect.
-func (s *Server) Accept() (*Conn, error) {
+// Accept waits for the sidecar to connect with a timeout.
+func (s *Server) Accept(timeout time.Duration) (*Conn, error) {
+	if timeout > 0 {
+		if ul, ok := s.listener.(*net.UnixListener); ok {
+			ul.SetDeadline(time.Now().Add(timeout))
+		}
+	}
 	conn, err := s.listener.Accept()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("accept: %w", err)
 	}
 	return &Conn{conn: conn}, nil
 }
