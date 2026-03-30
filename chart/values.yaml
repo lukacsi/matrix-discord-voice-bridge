@@ -1,0 +1,48 @@
+image:
+  repository: ghcr.io/lukacsi/matrix-discord-voice-bridge
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+config:
+  # Inline config.yaml — mounted as a Secret
+  discord:
+    guild_id: ""
+  livekit:
+    url: ""
+    api_key: ""
+    api_secret: ""
+  matrix:
+    homeserver_url: ""
+    as_token: ""
+    server_name: ""
+    lk_jwt_service_url: ""
+    admin_users: []
+  log_level: "info"
+
+# Bot tokens — stored in a separate Secret
+botTokens: []
+  # - "token1"
+  # - "token2"
+
+# Existing secret name (alternative to inline config)
+# Must contain key "config.yaml"
+existingSecret: ""
+
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: ""
+  accessMode: ReadWriteOnce
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []

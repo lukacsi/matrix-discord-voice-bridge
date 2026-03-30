@@ -1,0 +1,9 @@
+bin/
+*.sock
+bridge.db
+config.yaml
+.git
+.claude
+docs/
+node_modules/
+sidecar/node_modules/

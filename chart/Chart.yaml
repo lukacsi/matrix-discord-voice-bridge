@@ -1,0 +1,6 @@
+apiVersion: v2
+name: matrix-discord-voice-bridge
+description: Discord voice bridge for Matrix via LiveKit
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
