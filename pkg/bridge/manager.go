@@ -16,11 +16,11 @@ import (
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
-	"github.com/lukacsi/livekit-discord-bridge/pkg/ipc"
-	lk "github.com/lukacsi/livekit-discord-bridge/pkg/livekit"
-	mx "github.com/lukacsi/livekit-discord-bridge/pkg/matrix"
-	"github.com/lukacsi/livekit-discord-bridge/pkg/store"
-	"github.com/lukacsi/livekit-discord-bridge/pkg/types"
+	"github.com/lukacsi/matrix-discord-voice-bridge/pkg/ipc"
+	lk "github.com/lukacsi/matrix-discord-voice-bridge/pkg/livekit"
+	mx "github.com/lukacsi/matrix-discord-voice-bridge/pkg/matrix"
+	"github.com/lukacsi/matrix-discord-voice-bridge/pkg/store"
+	"github.com/lukacsi/matrix-discord-voice-bridge/pkg/types"
 )
 
 const bridgeProtocolID = "discord-voice"

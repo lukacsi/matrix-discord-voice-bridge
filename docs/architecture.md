@@ -44,7 +44,7 @@ lk-jwt-service computes the LiveKit room name as `SHA256(matrixRoomID + "|" + sl
 
 ### Discord DAVE E2EE
 
-Discord mandates DAVE for all voice. The only working third-party implementation is [davey](https://github.com/nicholasgasior/davey) (Rust/NAPI). godave (Go CGO bindings) is abandoned. This is why we have a Node.js sidecar. Replacing it with pure Go requires new CGO bindings to libdave's C API.
+Discord mandates DAVE for all voice. [godave](https://github.com/disgoorg/godave) provides Go CGO bindings to libdave but the build chain (libdave C++ + vcpkg + boringssl + mlspp) is complex. We use discord.js + [davey](https://github.com/nicholasgasior/davey) (Rust/NAPI) for the sidecar because it was the fastest path to working DAVE. Getting godave to build cleanly would eliminate the sidecar entirely.
 
 ### Discord Voice Constraints
 

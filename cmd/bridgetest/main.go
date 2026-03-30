@@ -1,3 +1,5 @@
+//go:build ignore
+
 package main
 
 import (
@@ -8,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/lukacsi/livekit-discord-bridge/pkg/ipc"
+	"github.com/lukacsi/matrix-discord-voice-bridge/pkg/ipc"
 )
 
 const socketPath = "/tmp/discord-voice-bridge.sock"

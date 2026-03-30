@@ -12,12 +12,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/lukacsi/livekit-discord-bridge/pkg/bridge"
-	"github.com/lukacsi/livekit-discord-bridge/pkg/config"
-	"github.com/lukacsi/livekit-discord-bridge/pkg/ipc"
-	lk "github.com/lukacsi/livekit-discord-bridge/pkg/livekit"
-	"github.com/lukacsi/livekit-discord-bridge/pkg/store"
-	mx "github.com/lukacsi/livekit-discord-bridge/pkg/matrix"
+	"github.com/lukacsi/matrix-discord-voice-bridge/pkg/bridge"
+	"github.com/lukacsi/matrix-discord-voice-bridge/pkg/config"
+	"github.com/lukacsi/matrix-discord-voice-bridge/pkg/ipc"
+	lk "github.com/lukacsi/matrix-discord-voice-bridge/pkg/livekit"
+	"github.com/lukacsi/matrix-discord-voice-bridge/pkg/store"
+	mx "github.com/lukacsi/matrix-discord-voice-bridge/pkg/matrix"
 )
 
 // LevelTrace is a custom slog level below Debug for per-frame verbosity.

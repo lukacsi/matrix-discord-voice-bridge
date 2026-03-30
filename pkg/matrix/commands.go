@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lukacsi/livekit-discord-bridge/pkg/types"
+	"github.com/lukacsi/matrix-discord-voice-bridge/pkg/types"
 
 	"maunium.net/go/mautrix/id"
 )

@@ -10,7 +10,7 @@ import (
 
 	"maunium.net/go/mautrix/id"
 
-	"github.com/lukacsi/livekit-discord-bridge/pkg/ipc"
+	"github.com/lukacsi/matrix-discord-voice-bridge/pkg/ipc"
 )
 
 func newTestManager() *Manager {

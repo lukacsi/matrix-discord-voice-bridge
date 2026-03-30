@@ -33,7 +33,7 @@ Discord Voice ←→ Node.js Sidecar ←→ Unix IPC ←→ Go Bridge ←→ Liv
 
 ### Why Node.js sidecar?
 
-Discord requires [DAVE E2EE](https://daveprotocol.com/) for all voice connections. I tried getting [godave](https://github.com/nicholasgasior/godave) (Go CGO bindings to libdave) working but couldn't — the repo is abandoned and the C++ build dependencies were a nightmare. The only working third-party DAVE implementation is [davey](https://github.com/nicholasgasior/davey) (Rust + NAPI-RS), used by discord.js. So the sidecar exists purely to handle Discord voice. If someone gets godave or equivalent CGO bindings working, the sidecar can be eliminated entirely — the Go bridge is already structured to replace it.
+Discord requires [DAVE E2EE](https://daveprotocol.com/) for all voice connections. I tried getting [godave](https://github.com/disgoorg/godave) (Go CGO bindings to libdave) working but couldn't get the C++ build chain to cooperate (libdave + vcpkg + boringssl + mlspp). The project is active but the build is complex. [davey](https://github.com/nicholasgasior/davey) (Rust + NAPI-RS) is what discord.js uses for DAVE, so the Node.js sidecar was the fastest path to a working bridge. If someone gets godave building cleanly, the sidecar can be eliminated — the Go bridge is already structured to replace it.
 
 ### Appservice registration
 
@@ -163,7 +163,7 @@ DM `@discord_voice_bridge:your-server` on Matrix:
 - **Must rejoin after restart** — the bridge skips stale `m.call.member` events on startup (4h expiry window makes active vs stale indistinguishable). Future: query LiveKit for active participants to auto-reconnect.
 - **1 VC per bot per guild** — Discord API constraint (gateway-level, not a library limit), mitigated by multi-bot pool
 - **Single guild** — currently hardcoded to one guild. Multi-guild is architecturally supported (one bot token handles all guilds, SQLite stores per-guild state) but not yet implemented.
-- **Node.js dependency** — required for Discord DAVE E2EE via davey. Goal: replace with pure Go CGO bindings to libdave.
+- **Node.js dependency** — required for Discord DAVE E2EE via davey. Goal: get godave building and eliminate the sidecar.
 
 ## E2EE
 
@@ -191,4 +191,4 @@ If you find this useful, have ideas, or want to contribute — issues and PRs ar
 
 ## License
 
-GNU Affero General Public License v3.0 — see [LICENSE](LICENSE).
+GNU General Public License v3.0 — see [LICENSE](LICENSE).
