@@ -258,7 +258,7 @@ async function main() {
 
   await new Promise((resolve) => {
     if (discordClient.isReady()) return resolve();
-    discordClient.once('ready', resolve);
+    discordClient.once('clientReady', resolve);
   });
 
   const guild = discordClient.guilds.cache.get(GUILD_ID);
