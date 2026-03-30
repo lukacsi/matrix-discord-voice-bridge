@@ -1,0 +1,16 @@
+# livekit-discord-bridge configuration
+
+discord:
+  bot_token: "your-discord-bot-token"
+  guild_id: "123456789012345678"
+
+livekit:
+  url: "wss://livekit.example.com"
+  api_key: "devkey"
+  api_secret: "your-api-secret"
+
+matrix:
+  homeserver_url: "https://matrix.example.com"
+  as_token: "your-appservice-token"
+  server_name: "example.com"
+  lk_jwt_service_url: "https://lk-jwt.example.com"

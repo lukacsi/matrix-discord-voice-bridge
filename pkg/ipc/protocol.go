@@ -22,6 +22,9 @@ const (
 	MsgJoinChannel      byte = 0x07
 	MsgLeaveChannel     byte = 0x08
 	MsgVoiceState       byte = 0x09
+	MsgChannelList      byte = 0x0A
+	MsgUserInfo         byte = 0x0B
+	MsgMatrixUsers      byte = 0x0C
 )
 
 // Message represents an IPC message from/to the sidecar.
@@ -102,6 +105,11 @@ func NewServer(socketPath string) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen: %w", err)
 	}
+	// Restrict socket to owner only — prevents local process injection
+	if err := os.Chmod(socketPath, 0600); err != nil {
+		l.Close()
+		return nil, fmt.Errorf("chmod socket: %w", err)
+	}
 	return &Server{listener: l, path: socketPath}, nil
 }
 
@@ -122,15 +130,20 @@ func (s *Server) Close() error {
 }
 
 // StartSidecar launches the Node.js sidecar process.
-// Channel is no longer passed — sidecar waits for JOIN_CHANNEL via IPC.
-func StartSidecar(sidecarDir, socketPath, token, guildID string) (*exec.Cmd, error) {
+// If primary is true, the sidecar watches voice states and sends channel lists.
+// Non-primary sidecars only handle audio bridging (JOIN/LEAVE/audio).
+func StartSidecar(sidecarDir, socketPath, token, guildID string, primary bool) (*exec.Cmd, error) {
 	cmd := exec.Command("node", "index.mjs")
 	cmd.Dir = sidecarDir
-	cmd.Env = append(os.Environ(),
+	env := append(os.Environ(),
 		"IPC_SOCKET_PATH="+socketPath,
 		"DISCORD_BOT_TOKEN="+token,
 		"DISCORD_GUILD_ID="+guildID,
 	)
+	if primary {
+		env = append(env, "SIDECAR_PRIMARY=true")
+	}
+	cmd.Env = env
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 

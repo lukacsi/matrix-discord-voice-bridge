@@ -22,8 +22,12 @@ const MSG_SHUTDOWN = 0x06;
 const MSG_JOIN_CHANNEL = 0x07;
 const MSG_LEAVE_CHANNEL = 0x08;
 const MSG_VOICE_STATE = 0x09;
+const MSG_CHANNEL_LIST = 0x0a;
+const MSG_USER_INFO = 0x0b;
+const MSG_MATRIX_USERS = 0x0c;
 
 const SIDECAR_USER_ID = '0';
+const PRIMARY = process.env.SIDECAR_PRIMARY === 'true';
 
 const SOCKET_PATH = process.env.IPC_SOCKET_PATH || '/tmp/discord-voice-bridge.sock';
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
@@ -54,6 +58,25 @@ function channelIdPayload(channelId) {
 function readChannelId(payload) {
   if (payload.length < 8) return null;
   return payload.readBigUInt64LE(0).toString();
+}
+
+// USER_INFO payload: name_len(2) + name(utf8) + avatar_len(2) + avatar_hash(utf8)
+function userInfoPayload(displayName, avatarHash) {
+  const nameBuf = Buffer.from(displayName, 'utf8');
+  const avatarBuf = Buffer.from(avatarHash || '', 'utf8');
+  const buf = Buffer.alloc(2 + nameBuf.length + 2 + avatarBuf.length);
+  buf.writeUInt16LE(nameBuf.length, 0);
+  nameBuf.copy(buf, 2);
+  buf.writeUInt16LE(avatarBuf.length, 2 + nameBuf.length);
+  avatarBuf.copy(buf, 4 + nameBuf.length);
+  return buf;
+}
+
+function sendUserInfo(socket, member) {
+  if (!member || !member.user) return;
+  const name = member.displayName || member.user.globalName || member.user.username;
+  const avatar = member.user.avatar || '';
+  writeMessage(socket, MSG_USER_INFO, member.id, userInfoPayload(name, avatar));
 }
 
 // VOICE_STATE payload: channel_id(8) + category_id(8) + name_len(2) + name(utf8)
@@ -135,6 +158,47 @@ let currentChannelId = null;
 let currentConnection = null;
 let currentPlayer = null;
 let opusStream = null;
+let originalNickname = null;
+
+// Parse MSG_MATRIX_USERS payload and update bot nickname to show connected Matrix users.
+// Payload: count(2) + [nameLen(2) + name(utf8)]*
+function updateBotNickname(payload) {
+  if (!discordClient || payload.length < 2) return;
+
+  const count = payload.readUInt16LE(0);
+  const names = [];
+  let offset = 2;
+  for (let i = 0; i < count && offset < payload.length; i++) {
+    const nameLen = payload.readUInt16LE(offset);
+    offset += 2;
+    if (offset + nameLen <= payload.length) {
+      names.push(payload.subarray(offset, offset + nameLen).toString('utf8'));
+    }
+    offset += nameLen;
+  }
+
+  const guild = discordClient.guilds.cache.get(GUILD_ID);
+  if (!guild) return;
+
+  const me = guild.members.me;
+  if (!me) return;
+
+  // Save original nickname on first call
+  if (originalNickname === null) {
+    originalNickname = me.nickname || '';
+  }
+
+  const newNick = names.length > 0
+    ? names.join(', ')
+    : originalNickname;
+
+  // Discord nickname max 32 chars
+  const truncated = newNick.length > 32 ? newNick.substring(0, 29) + '...' : newNick;
+
+  me.setNickname(truncated).catch((err) => {
+    console.error(`[sidecar] failed to set nickname: ${err.message}`);
+  });
+}
 
 async function main() {
   discordClient = new Client({
@@ -177,6 +241,8 @@ async function main() {
     } else if (type === MSG_LEAVE_CHANNEL) {
       console.log('[sidecar] LEAVE_CHANNEL');
       leaveChannel();
+    } else if (type === MSG_MATRIX_USERS) {
+      updateBotNickname(payload);
     }
   });
 
@@ -201,46 +267,55 @@ async function main() {
     process.exit(1);
   }
 
-  // Watch voice state updates guild-wide
-  discordClient.on('voiceStateUpdate', (oldState, newState) => {
-    // Ignore bot's own voice state changes
-    if (newState.member?.user?.bot && newState.member.user.id === discordClient.user.id) return;
+  // Primary sidecar: watch voice states and sync channels.
+  // Non-primary sidecars only handle audio (JOIN/LEAVE/audio).
+  if (PRIMARY) {
+    discordClient.on('voiceStateUpdate', (oldState, newState) => {
+      if (newState.member?.user?.bot && newState.member.user.id === discordClient.user.id) return;
 
-    const userId = newState.id;
+      const userId = newState.id;
 
-    if (oldState.channelId !== newState.channelId) {
-      // User moved, joined, or left
-      const channelId = newState.channelId || '0';
-      const channel = newState.channel;
-      const payload = voiceStatePayload(channelId, channel?.name || '', channel?.parentId || '0');
-      writeMessage(ipcSocket, MSG_VOICE_STATE, userId, payload);
-
-      if (newState.channelId) {
-        console.log(`[sidecar] voice: ${userId} joined "${channel?.name}" (${newState.channelId}) category=${channel?.parentId}`);
-      } else {
-        console.log(`[sidecar] voice: ${userId} left voice`);
+      if (oldState.channelId !== newState.channelId) {
+        const channelId = newState.channelId || '0';
+        const channel = newState.channel;
+        const payload = voiceStatePayload(channelId, channel?.name || '', channel?.parentId || '0');
+        writeMessage(ipcSocket, MSG_VOICE_STATE, userId, payload);
+        if (newState.channelId) {
+          sendUserInfo(ipcSocket, newState.member);
+        }
       }
-    }
-  });
+    });
 
-  // Send initial voice states for users already in VCs
-  for (const [, state] of guild.voiceStates.cache) {
-    if (state.channelId && !state.member?.user?.bot) {
-      const channel = guild.channels.cache.get(state.channelId);
-      const payload = voiceStatePayload(state.channelId, channel?.name || '', channel?.parentId || '0');
-      writeMessage(ipcSocket, MSG_VOICE_STATE, state.id, payload);
+    // Sync all voice channels
+    const voiceChannels = guild.channels.cache.filter(
+      (c) => c.type === 2 || c.type === 13,
+    );
+    for (const [, channel] of voiceChannels) {
+      const payload = voiceStatePayload(channel.id, channel.name, channel.parentId || '0');
+      writeMessage(ipcSocket, MSG_CHANNEL_LIST, SIDECAR_USER_ID, payload);
+    }
+    console.log(`[sidecar] primary: sent ${voiceChannels.size} voice channels`);
+
+    // Send initial voice states + user info
+    for (const [, state] of guild.voiceStates.cache) {
+      if (state.channelId && !state.member?.user?.bot) {
+        const channel = guild.channels.cache.get(state.channelId);
+        const payload = voiceStatePayload(state.channelId, channel?.name || '', channel?.parentId || '0');
+        writeMessage(ipcSocket, MSG_VOICE_STATE, state.id, payload);
+        sendUserInfo(ipcSocket, state.member);
+      }
     }
   }
 
   writeMessage(ipcSocket, MSG_READY, SIDECAR_USER_ID, null);
   console.log('[sidecar] sent READY — watching voice states');
 
-  // Stats
+  // Stats — log every 60s to avoid spam
   const startTime = Date.now();
   setInterval(() => {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
-    console.log(`[sidecar] ${elapsed}s uptime, forwarded frames: ${frameCount}, channel: ${currentChannelId || 'none'}`);
-  }, 10_000);
+    console.log(`[sidecar] ${elapsed}s uptime, frames: ${frameCount}, channel: ${currentChannelId || 'none'}`);
+  }, 60_000);
 }
 
 async function joinChannel(channelId) {
@@ -264,10 +339,25 @@ async function joinChannel(channelId) {
     adapterCreator: guild.voiceAdapterCreator,
   });
 
+  // Handle connection errors to prevent unhandled 'error' crash
+  connection.on('error', (err) => {
+    console.error(`[sidecar] voice connection error: ${err.message}`);
+    leaveChannel();
+  });
+
+  // Handle unexpected disconnects
+  connection.on('stateChange', (oldState, newState) => {
+    if (newState.status === VoiceConnectionStatus.Disconnected) {
+      console.warn('[sidecar] voice connection disconnected, cleaning up');
+      leaveChannel();
+    }
+  });
+
   try {
-    await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
+    await entersState(connection, VoiceConnectionStatus.Ready, 5_000);
   } catch (err) {
     console.error(`[sidecar] failed to join channel ${channelId}: ${err.message}`);
+    connection.destroy();
     currentChannelId = null;
     return;
   }
@@ -316,7 +406,7 @@ async function joinChannel(channelId) {
 
 function leaveChannel() {
   if (currentConnection) {
-    currentConnection.destroy();
+    try { currentConnection.destroy(); } catch (_) {}
     currentConnection = null;
   }
   if (currentPlayer) {
@@ -332,6 +422,14 @@ function leaveChannel() {
     currentChannelId = null;
   }
   frameCount = 0;
+
+  // Restore original nickname
+  if (originalNickname !== null && discordClient) {
+    const guild = discordClient.guilds.cache.get(GUILD_ID);
+    if (guild?.members.me) {
+      guild.members.me.setNickname(originalNickname).catch(() => {});
+    }
+  }
 }
 
 function cleanup() {
@@ -344,6 +442,9 @@ function cleanup() {
 
 process.on('SIGINT', () => cleanup());
 process.on('SIGTERM', () => cleanup());
+process.on('unhandledRejection', (err) => {
+  console.error(`[sidecar] unhandled rejection: ${err}`);
+});
 
 main().catch((err) => {
   console.error('[sidecar] fatal:', err);
