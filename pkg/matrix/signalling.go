@@ -93,6 +93,26 @@ func LiveKitRoomAlias(roomID string) string {
 	return base64.RawStdEncoding.EncodeToString(hash[:])
 }
 
+// sendStateRetry sends a state event with timeout and retry (max 3 attempts, linear backoff).
+func (s *Signaller) sendStateRetry(ctx context.Context, intent *appservice.IntentAPI, roomID id.RoomID, evtType event.Type, stateKey string, content interface{}) error {
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		_, err = intent.SendStateEvent(reqCtx, roomID, evtType, stateKey, content)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if attempt < 3 {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+	}
+	return err
+}
+
 // JoinCall sends an m.call.member state event for a Discord user in the given room.
 func (s *Signaller) JoinCall(ctx context.Context, discordUserID uint64, roomID id.RoomID) error {
 	mxid := s.discordMXID(discordUserID)
@@ -101,11 +121,16 @@ func (s *Signaller) JoinCall(ctx context.Context, discordUserID uint64, roomID i
 
 	intent := s.as.Intent(mxid)
 
-	// Ensure the virtual user is registered and in the room
-	if err := intent.EnsureRegistered(ctx); err != nil {
+	regCtx, regCancel := context.WithTimeout(ctx, 10*time.Second)
+	if err := intent.EnsureRegistered(regCtx); err != nil {
 		s.logger.Warn("user registration (may already exist)", slog.Any("err", err))
 	}
-	if err := intent.EnsureJoined(ctx, roomID); err != nil {
+	regCancel()
+
+	joinCtx, joinCancel := context.WithTimeout(ctx, 10*time.Second)
+	err := intent.EnsureJoined(joinCtx, roomID)
+	joinCancel()
+	if err != nil {
 		return fmt.Errorf("join room %s as %s: %w", roomID, mxid, err)
 	}
 
@@ -130,11 +155,10 @@ func (s *Signaller) JoinCall(ctx context.Context, discordUserID uint64, roomID i
 		},
 	}
 
-	_, err := intent.SendStateEvent(ctx, roomID, event.Type{
+	if err := s.sendStateRetry(ctx, intent, roomID, event.Type{
 		Type:  callMemberEventType,
 		Class: event.StateEventType,
-	}, stateKey, content)
-	if err != nil {
+	}, stateKey, content); err != nil {
 		return fmt.Errorf("send m.call.member for %s: %w", mxid, err)
 	}
 
@@ -168,11 +192,10 @@ func (s *Signaller) LeaveCall(ctx context.Context, discordUserID uint64) error {
 	}
 
 	intent := s.as.Intent(info.mxid)
-	_, err := intent.SendStateEvent(ctx, info.roomID, event.Type{
+	if err := s.sendStateRetry(ctx, intent, info.roomID, event.Type{
 		Type:  callMemberEventType,
 		Class: event.StateEventType,
-	}, info.stateKey, map[string]interface{}{})
-	if err != nil {
+	}, info.stateKey, map[string]interface{}{}); err != nil {
 		return fmt.Errorf("remove m.call.member for %s: %w", info.mxid, err)
 	}
 
@@ -290,7 +313,9 @@ func (s *Signaller) uploadAndSetAvatar(ctx context.Context, intent *appservice.I
 // GetDisplayName returns the display name for a Matrix user, or the localpart as fallback.
 func (s *Signaller) GetDisplayName(ctx context.Context, userID id.UserID) string {
 	client := s.BotIntent().Client
-	profile, err := client.GetProfile(ctx, userID)
+	profCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	profile, err := client.GetProfile(profCtx, userID)
 	if err == nil && profile.DisplayName != "" {
 		return profile.DisplayName
 	}
@@ -403,21 +428,19 @@ type CallMemberHandler func(ctx context.Context, roomID id.RoomID, userMXID stri
 // StartSync begins a /sync loop as the voice bridge bot, watching for m.call.member
 // state events in voice rooms. Calls onCallMember for each event.
 // Runs in a background goroutine; cancel ctx to stop.
-func (s *Signaller) StartSync(ctx context.Context, onCallMember CallMemberHandler) {
+func (s *Signaller) StartSync(ctx context.Context, onCallMember CallMemberHandler) error {
 	// Create a dedicated client for /sync — the appservice intent client has no Syncer.
 	// Must set AppServiceUserID so all requests include ?user_id= for the AS token.
 	botMXID := id.UserID(fmt.Sprintf("@discord_voice_bridge:%s", s.config.ServerName))
 	client, err := mautrix.NewClient(s.config.HomeserverURL, botMXID, s.config.ASToken)
 	if err != nil {
-		s.logger.Error("failed to create sync client", slog.Any("err", err))
-		return
+		return fmt.Errorf("create sync client: %w", err)
 	}
 	client.SetAppServiceUserID = true
 
 	syncer, ok := client.Syncer.(*mautrix.DefaultSyncer)
 	if !ok {
-		s.logger.Error("unexpected Syncer type on mautrix client")
-		return
+		return fmt.Errorf("unexpected Syncer type on mautrix client")
 	}
 
 	// Only process events from incremental syncs (since != "").
@@ -475,4 +498,5 @@ func (s *Signaller) StartSync(ctx context.Context, onCallMember CallMemberHandle
 	}()
 
 	s.logger.Info("started Matrix /sync loop for call member events")
+	return nil
 }

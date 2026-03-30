@@ -153,7 +153,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 	}
 
 	// Start Matrix /sync loop + membership renewal
-	signaller.StartSync(ctx, mgr.OnMatrixCallMember)
+	if err := signaller.StartSync(ctx, mgr.OnMatrixCallMember); err != nil {
+		return fmt.Errorf("start sync: %w", err)
+	}
 	signaller.StartRenewal(ctx)
 
 	// Signal all sidecars to shut down on context cancel

@@ -146,6 +146,9 @@ func NewSubscriber(config Config, handler OpusFrameHandler, slogger *slog.Logger
 			OnTrackSubscribed:   s.onTrackSubscribed,
 			OnTrackUnsubscribed: s.onTrackUnsubscribed,
 		},
+		OnDisconnected: func() {
+			slogger.Warn("subscriber disconnected from LiveKit")
+		},
 	},
 		lksdk.WithAutoSubscribe(true),
 	)

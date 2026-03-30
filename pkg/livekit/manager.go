@@ -89,15 +89,27 @@ func (m *Manager) ensureParticipant(userID uint64) error {
 		return fmt.Errorf("create track: %w", err)
 	}
 
+	var roomRef *lksdk.Room
 	room, err := lksdk.ConnectToRoom(m.config.URL, lksdk.ConnectInfo{
 		APIKey:              m.config.APIKey,
 		APISecret:           m.config.APISecret,
 		RoomName:            m.config.RoomName,
 		ParticipantIdentity: identity,
 		ParticipantName:     identity,
-	}, &lksdk.RoomCallback{},
+	}, &lksdk.RoomCallback{
+		OnDisconnected: func() {
+			m.mu.Lock()
+			if p, ok := m.participants[userID]; ok && p.room == roomRef {
+				delete(m.participants, userID)
+			}
+			m.mu.Unlock()
+			m.logger.Warn("LiveKit participant disconnected unexpectedly",
+				slog.Uint64("discord_user", userID))
+		},
+	},
 		lksdk.WithRetransmitBufferSize(0),
 	)
+	roomRef = room
 	if err != nil {
 		track.Close()
 		m.clearConnecting(userID)
@@ -135,23 +147,25 @@ func (m *Manager) clearConnecting(userID uint64) {
 }
 
 // WriteOpus writes a raw Opus frame directly to the user's LiveKit track.
-// WriteSample handles RTP timing internally — no additional pacing needed.
-// Creates the participant lazily if it doesn't exist (first frame dropped during connect).
+// Creates the participant in the background if it doesn't exist — frames are
+// dropped during connect to avoid blocking the IPC read loop.
 func (m *Manager) WriteOpus(userID uint64, opusFrame []byte) error {
 	m.mu.Lock()
 	p, ok := m.participants[userID]
+	isConnecting := m.connecting[userID]
 	m.mu.Unlock()
 
 	if !ok {
-		if err := m.ensureParticipant(userID); err != nil {
-			return err
+		if isConnecting {
+			return nil // drop frames during connect
 		}
-		m.mu.Lock()
-		p = m.participants[userID]
-		m.mu.Unlock()
-		if p == nil {
-			return nil // first frame dropped during connect
-		}
+		go func() {
+			if err := m.ensureParticipant(userID); err != nil {
+				m.logger.Warn("failed to create LiveKit participant",
+					slog.Uint64("user", userID), slog.Any("err", err))
+			}
+		}()
+		return nil // drop first frame
 	}
 
 	return p.track.WriteSample(media.Sample{
