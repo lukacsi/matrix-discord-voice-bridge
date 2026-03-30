@@ -9,7 +9,8 @@ RUN CGO_ENABLED=0 go build -o /bridge ./cmd/bridge
 # Stage 2: Install Node.js sidecar dependencies
 FROM node:22-bookworm-slim AS node-builder
 WORKDIR /sidecar
-COPY sidecar/package.json sidecar/package-lock.json* ./
+COPY sidecar/package.json ./
+COPY sidecar/package-lock.json ./
 RUN npm ci --omit=dev
 
 # Stage 3: Runtime
