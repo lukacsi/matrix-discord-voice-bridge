@@ -345,16 +345,8 @@ async function joinChannel(channelId) {
     leaveChannel();
   });
 
-  // Handle unexpected disconnects
-  connection.on('stateChange', (oldState, newState) => {
-    if (newState.status === VoiceConnectionStatus.Disconnected) {
-      console.warn('[sidecar] voice connection disconnected, cleaning up');
-      leaveChannel();
-    }
-  });
-
   try {
-    await entersState(connection, VoiceConnectionStatus.Ready, 5_000);
+    await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
   } catch (err) {
     console.error(`[sidecar] failed to join channel ${channelId}: ${err.message}`);
     connection.destroy();
@@ -364,6 +356,14 @@ async function joinChannel(channelId) {
 
   currentConnection = connection;
   console.log(`[sidecar] joined voice channel ${channelId}`);
+
+  // Now that connection is Ready, watch for unexpected disconnects
+  connection.on('stateChange', (_oldState, newState) => {
+    if (newState.status === VoiceConnectionStatus.Disconnected) {
+      console.warn('[sidecar] voice connection disconnected, cleaning up');
+      leaveChannel();
+    }
+  });
 
   // Audio player for sending mixed audio to Discord
   currentPlayer = createAudioPlayer({
