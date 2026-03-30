@@ -1,5 +1,15 @@
 # Notes — livekit-discord-bridge
 
+## 2026-03-30 — Resilience, logging, DM commands
+
+**Context:** Bridge was functional but fragile — no timeouts, silent failures, inconsistent logs, no runtime control.
+
+**Done:**
+- Resilience: IPC read/write deadlines, bounded shutdown (SIGTERM→5s→SIGKILL), sidecar crash recovery (dead slot sentinel), LiveKit OnDisconnected callbacks, Matrix API retry (3 attempts + timeouts), non-blocking WriteOpus
+- Uniform logging: consistent field names (discord_user, matrix_room, etc.), 3 levels (info/debug/trace via -log-level flag), pion log filter, sidecar slot prefix
+- Matrix DM command interface: !status, !rooms, !bots, !join, !leave, !log-level, !help. Admin-only via config. Auto-joins DM rooms on invite. Bot display name set at startup.
+- Bug fixes: voice join failure (disconnect handler timing), channel switch slot preemption, debounced stop, camera toggle filter, LiveKit room alias hash mismatch
+
 ## 2026-03-30 — Production-quality bridge rebuild
 
 **Context:** Bridge had basic dynamic mirroring (voice state → auto-bridge) but rooms weren't in the Space hierarchy, rooms duplicated on restart, audio bridged whenever Discord users were in VC (not when Matrix users joined), and only supported 1 bot token.

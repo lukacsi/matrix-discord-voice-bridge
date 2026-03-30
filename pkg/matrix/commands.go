@@ -86,6 +86,12 @@ func (h *CommandHandler) Handle(ctx context.Context, roomID id.RoomID, sender, b
 		return h.cmdLeave(ctx, args)
 	case "!log-level":
 		return h.cmdLogLevel(args)
+	case "!bot-add":
+		return h.cmdBotAdd(ctx, args)
+	case "!bot-remove":
+		return h.cmdBotRemove(ctx, args)
+	case "!sync-db":
+		return h.cmdSyncDB(ctx)
 	default:
 		return fmt.Sprintf("unknown command: %s — try !help", cmd)
 	}
@@ -96,6 +102,9 @@ func (h *CommandHandler) cmdHelp() string {
 !status — uptime, active bridges, slot usage
 !rooms — list voice channel → Matrix room mappings
 !bots — list sidecar slots and their status
+!bot-add <token> — hot-add a Discord bot (persisted to DB)
+!bot-remove <slot> — remove a bot slot
+!sync-db — rebuild DB from Matrix state events
 !join <channel-name> — manually start bridge for a channel
 !leave [channel-name] — stop bridge (all if no name)
 !log-level <info|debug|trace> — change log level at runtime
@@ -195,4 +204,38 @@ func (h *CommandHandler) cmdLogLevel(args []string) string {
 	}
 	h.logger.Info("log level changed via command", slog.String("level", level))
 	return fmt.Sprintf("Log level set to %s", level)
+}
+
+func (h *CommandHandler) cmdSyncDB(ctx context.Context) string {
+	found, err := h.manager.RebuildDB(ctx)
+	if err != nil {
+		return fmt.Sprintf("Failed to rebuild DB: %s", err)
+	}
+	return fmt.Sprintf("Rebuilt database from Matrix state: %d rooms found.", found)
+}
+
+func (h *CommandHandler) cmdBotAdd(ctx context.Context, args []string) string {
+	if len(args) == 0 {
+		return "Usage: !bot-add <discord-bot-token>"
+	}
+	token := args[0]
+	slotIdx, err := h.manager.AddBot(ctx, token)
+	if err != nil {
+		return fmt.Sprintf("Failed to add bot: %s", err)
+	}
+	return fmt.Sprintf("Bot added as slot %d (audio-only). Persisted to database.", slotIdx)
+}
+
+func (h *CommandHandler) cmdBotRemove(ctx context.Context, args []string) string {
+	if len(args) == 0 {
+		return "Usage: !bot-remove <slot-number>"
+	}
+	var slotIdx int
+	if _, err := fmt.Sscanf(args[0], "%d", &slotIdx); err != nil {
+		return fmt.Sprintf("Invalid slot number: %s", args[0])
+	}
+	if err := h.manager.RemoveBot(ctx, slotIdx); err != nil {
+		return fmt.Sprintf("Failed to remove bot: %s", err)
+	}
+	return fmt.Sprintf("Slot %d removed and marked dead.", slotIdx)
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/lukacsi/livekit-discord-bridge/pkg/config"
 	"github.com/lukacsi/livekit-discord-bridge/pkg/ipc"
 	lk "github.com/lukacsi/livekit-discord-bridge/pkg/livekit"
+	"github.com/lukacsi/livekit-discord-bridge/pkg/store"
 	mx "github.com/lukacsi/livekit-discord-bridge/pkg/matrix"
 )
 
@@ -85,7 +86,31 @@ func main() {
 }
 
 func run(ctx context.Context, logger *slog.Logger, cfg *config.Config, levelVar *slog.LevelVar) error {
-	tokens := cfg.Discord.Tokens()
+	// Open database
+	db, err := store.Open(cfg.Database)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer db.Close()
+	logger.Info("database opened", slog.String("path", cfg.Database))
+
+	// Seed config tokens into DB (idempotent — skips existing)
+	for _, token := range cfg.Discord.Tokens() {
+		if _, err := db.AddBot(token, cfg.Discord.GuildID); err != nil {
+			logger.Debug("bot token already in database or error", slog.Any("err", err))
+		}
+	}
+
+	// Load active bots from DB (includes config + previously hot-added)
+	bots, err := db.AllActiveBots()
+	if err != nil {
+		return fmt.Errorf("load bots: %w", err)
+	}
+	tokens := make([]string, len(bots))
+	for i, b := range bots {
+		tokens[i] = b.Token
+	}
+
 	logger.Info("starting bridge",
 		slog.Int("bot_count", len(tokens)),
 		slog.String("guild", cfg.Discord.GuildID),
@@ -189,9 +214,53 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config, levelVar 
 		APISecret: cfg.LiveKit.APISecret,
 	}
 
-	mgr := bridge.NewManager(slots, signaller, lkConfig,
+	mgr := bridge.NewManager(slots, signaller, db, lkConfig,
 		cfg.Discord.GuildID, cfg.Matrix.ServerName, cfg.Matrix.LKJWTService, logger)
 	defer mgr.Close(context.Background())
+
+	// Read loop launcher — used for initial slots and hot-added bots
+	errCh := make(chan error, 16)
+	var wg sync.WaitGroup
+	startReadLoop := func(s *bridge.SidecarSlot) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				msg, err := s.Conn.ReadMessage()
+				if err != nil {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+						mgr.HandleSlotDeath(ctx, s.Index)
+						if s.Primary {
+							errCh <- fmt.Errorf("primary sidecar (slot %d) died: %w", s.Index, err)
+						}
+						return
+					}
+				}
+				switch msg.Type {
+				case ipc.MsgReady:
+					role := "audio"
+					if s.Primary {
+						role = "primary"
+					}
+					logger.Info("sidecar READY", slog.Int("slot", s.Index), slog.String("role", role))
+				case ipc.MsgShutdown:
+					return
+				default:
+					mgr.HandleMessage(ctx, s.Index, msg)
+				}
+			}
+		}()
+	}
+
+	// Configure hot-add support
+	mgr.SetSidecarConfig(bridge.SidecarConfig{
+		Dir:        cfg.Sidecar.Dir,
+		SocketBase: cfg.Sidecar.SocketPath,
+		LogLevel:   cfg.LogLevel,
+	}, startReadLoop)
 
 	// Discover rooms from previous runs
 	if err := mgr.DiscoverExistingRooms(ctx); err != nil {
@@ -220,45 +289,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config, levelVar 
 		}
 	}()
 
-	// Start a read loop per sidecar slot
-	errCh := make(chan error, len(slots))
-	var wg sync.WaitGroup
-
+	// Start read loops for initial slots
 	for _, slot := range slots {
-		wg.Add(1)
-		go func(s *bridge.SidecarSlot) {
-			defer wg.Done()
-			for {
-				msg, err := s.Conn.ReadMessage()
-				if err != nil {
-					select {
-					case <-ctx.Done():
-						return
-					default:
-						// Sidecar died — clean up this slot
-						mgr.HandleSlotDeath(ctx, s.Index)
-						if s.Primary {
-							// Primary sidecar is critical — bridge can't function without voice state
-							errCh <- fmt.Errorf("primary sidecar (slot %d) died: %w", s.Index, err)
-						}
-						return
-					}
-				}
-
-				switch msg.Type {
-				case ipc.MsgReady:
-					role := "audio"
-					if s.Primary {
-						role = "primary"
-					}
-					logger.Info("sidecar READY", slog.Int("slot", s.Index), slog.String("role", role))
-				case ipc.MsgShutdown:
-					return
-				default:
-					mgr.HandleMessage(ctx, s.Index, msg)
-				}
-			}
-		}(slot)
+		startReadLoop(slot)
 	}
 
 	// Monitor sidecar processes — detect crashes before IPC EOF

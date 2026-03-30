@@ -29,4 +29,7 @@ type ManagerAPI interface {
 	ListSlots() []SlotInfo
 	ManualJoin(ctx context.Context, channelName string) error
 	ManualLeave(ctx context.Context, channelName string) error
+	AddBot(ctx context.Context, token string) (int, error)    // returns slot index
+	RemoveBot(ctx context.Context, slotIdx int) error
+	RebuildDB(ctx context.Context) (int, error)              // re-scan Matrix, returns rooms found
 }

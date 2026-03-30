@@ -19,6 +19,7 @@ import (
 	"github.com/lukacsi/livekit-discord-bridge/pkg/ipc"
 	lk "github.com/lukacsi/livekit-discord-bridge/pkg/livekit"
 	mx "github.com/lukacsi/livekit-discord-bridge/pkg/matrix"
+	"github.com/lukacsi/livekit-discord-bridge/pkg/store"
 	"github.com/lukacsi/livekit-discord-bridge/pkg/types"
 )
 
@@ -55,14 +56,24 @@ type ChannelBridge struct {
 
 // Manager coordinates voice channel bridging for a guild.
 // Supports N sidecar slots for N concurrent voice channel bridges.
+// SidecarConfig holds parameters needed to start a sidecar dynamically.
+type SidecarConfig struct {
+	Dir        string
+	SocketBase string // base socket path (e.g. /tmp/discord-voice-bridge.sock)
+	LogLevel   string
+}
+
 type Manager struct {
-	slots      []*SidecarSlot
-	signaller  *mx.Signaller
-	lkConfig   lk.Config
-	guildID    string
-	serverName string
-	lkJWTSvc   string
-	logger     *slog.Logger
+	slots        []*SidecarSlot
+	signaller    *mx.Signaller
+	store        *store.Store
+	lkConfig     lk.Config
+	sidecarCfg   SidecarConfig
+	guildID      string
+	serverName   string
+	lkJWTSvc     string
+	logger       *slog.Logger
+	onSlotReady  func(slot *SidecarSlot) // called when new slot's read loop should start
 
 	mu             sync.Mutex
 	voiceStates    map[uint64]uint64              // discord user ID → channel ID
@@ -80,6 +91,7 @@ type Manager struct {
 func NewManager(
 	slots []*SidecarSlot,
 	signaller *mx.Signaller,
+	db *store.Store,
 	lkConfig lk.Config,
 	guildID, serverName, lkJWTSvc string,
 	logger *slog.Logger,
@@ -87,6 +99,7 @@ func NewManager(
 	return &Manager{
 		slots:          slots,
 		signaller:      signaller,
+		store:          db,
 		lkConfig:       lkConfig,
 		guildID:        guildID,
 		serverName:     serverName,
@@ -101,6 +114,165 @@ func NewManager(
 		matrixUsers:    make(map[uint64]map[string]string),
 		stopTimers:     make(map[uint64]*time.Timer),
 	}
+}
+
+// SetSidecarConfig sets the config needed for hot-adding sidecars.
+func (m *Manager) SetSidecarConfig(cfg SidecarConfig, onReady func(slot *SidecarSlot)) {
+	m.sidecarCfg = cfg
+	m.onSlotReady = onReady
+}
+
+// AddBot hot-adds a new Discord bot token — starts a sidecar and creates a new slot.
+func (m *Manager) AddBot(ctx context.Context, token string) (int, error) {
+	slotIdx := len(m.slots) // next index
+
+	socketPath := fmt.Sprintf("%s.%d", m.sidecarCfg.SocketBase, slotIdx)
+
+	srv, err := ipc.NewServer(socketPath)
+	if err != nil {
+		return 0, fmt.Errorf("create socket: %w", err)
+	}
+
+	cmd, err := ipc.StartSidecar(m.sidecarCfg.Dir, socketPath, token, m.guildID, m.sidecarCfg.LogLevel, false, slotIdx)
+	if err != nil {
+		srv.Close()
+		return 0, fmt.Errorf("start sidecar: %w", err)
+	}
+
+	conn, err := srv.Accept(30 * time.Second)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		srv.Close()
+		return 0, fmt.Errorf("sidecar connect: %w", err)
+	}
+	conn.SetWriteTimeout(5 * time.Second)
+	srv.Close() // listener no longer needed
+
+	masked := token
+	if len(masked) > 10 {
+		masked = masked[:10] + "..."
+	}
+
+	slot := &SidecarSlot{
+		Conn:    conn,
+		Index:   slotIdx,
+		Primary: false,
+		Token:   masked,
+	}
+
+	m.mu.Lock()
+	m.slots = append(m.slots, slot)
+	m.mu.Unlock()
+
+	// Persist to DB
+	if m.store != nil {
+		if _, err := m.store.AddBot(token, m.guildID); err != nil {
+			m.logger.Warn("failed to persist bot token", slog.Any("err", err))
+		}
+	}
+
+	m.logger.Info("hot-added bot", slog.Int("slot", slotIdx))
+
+	// Start the read loop for this slot
+	if m.onSlotReady != nil {
+		m.onSlotReady(slot)
+	}
+
+	return slotIdx, nil
+}
+
+// RemoveBot stops a sidecar slot and marks it dead.
+func (m *Manager) RemoveBot(ctx context.Context, slotIdx int) error {
+	m.mu.Lock()
+	if slotIdx < 0 || slotIdx >= len(m.slots) {
+		m.mu.Unlock()
+		return fmt.Errorf("slot %d does not exist", slotIdx)
+	}
+	slot := m.slots[slotIdx]
+	if slot.channelID == ^uint64(0) {
+		m.mu.Unlock()
+		return fmt.Errorf("slot %d is already dead", slotIdx)
+	}
+	m.mu.Unlock()
+
+	// Stop any active bridge on this slot
+	m.HandleSlotDeath(ctx, slotIdx)
+
+	// Close the IPC connection (triggers sidecar shutdown)
+	if slot.Conn != nil {
+		_ = slot.Conn.WriteMessage(&ipc.Message{Type: ipc.MsgShutdown})
+		slot.Conn.Close()
+	}
+
+	m.logger.Info("removed bot", slog.Int("slot", slotIdx))
+	return nil
+}
+
+// RebuildDB re-scans Matrix state events and rebuilds the room database.
+func (m *Manager) RebuildDB(ctx context.Context) (int, error) {
+	if m.store == nil {
+		return 0, fmt.Errorf("no database configured")
+	}
+
+	intent := m.signaller.BotIntent()
+	resp, err := intent.Client.JoinedRooms(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("list joined rooms: %w", err)
+	}
+
+	bridgeEventType := event.Type{Type: "m.bridge", Class: event.StateEventType}
+	prefix := fmt.Sprintf("fi.mau.discord://discord/%s/", m.guildID)
+	found := 0
+
+	for _, roomID := range resp.JoinedRooms {
+		stateMap, err := intent.Client.State(ctx, roomID)
+		if err != nil {
+			continue
+		}
+		bridges, ok := stateMap[bridgeEventType]
+		if !ok {
+			continue
+		}
+		for stateKey, evt := range bridges {
+			if !strings.HasPrefix(stateKey, prefix) {
+				continue
+			}
+			raw := evt.Content.Raw
+			if raw == nil {
+				continue
+			}
+			protocol, _ := raw["protocol"].(map[string]interface{})
+			if protocol == nil || protocol["id"] != bridgeProtocolID {
+				continue
+			}
+			channel, _ := raw["channel"].(map[string]interface{})
+			if channel == nil {
+				continue
+			}
+			chIDStr, _ := channel["id"].(string)
+			chID, err := strconv.ParseUint(chIDStr, 10, 64)
+			if err != nil {
+				continue
+			}
+			name, _ := channel["displayname"].(string)
+
+			m.mu.Lock()
+			m.channelRooms[chID] = roomID
+			m.roomChannels[roomID] = chID
+			m.mu.Unlock()
+
+			_ = m.store.UpsertRoom(store.Room{
+				DiscordChannel: chID,
+				MatrixRoom:     string(roomID),
+				Name:           name,
+				GuildID:        m.guildID,
+			})
+			found++
+		}
+	}
+
+	m.logger.Info("rebuilt database from Matrix state", slog.Int("rooms", found))
+	return found, nil
 }
 
 // HandleMessage processes an IPC message from a sidecar slot.
@@ -748,11 +920,21 @@ func (m *Manager) ensureMatrixRoom(ctx context.Context, channelID uint64, info c
 
 	roomID := createResp.RoomID
 
-	// Cache for future lookups (both directions)
+	// Cache for future lookups (both directions) + persist to DB
 	m.mu.Lock()
 	m.channelRooms[channelID] = roomID
 	m.roomChannels[roomID] = channelID
 	m.mu.Unlock()
+
+	if m.store != nil {
+		_ = m.store.UpsertRoom(store.Room{
+			DiscordChannel: channelID,
+			MatrixRoom:     string(roomID),
+			Name:           info.name,
+			GuildID:        m.guildID,
+			CategoryID:     info.categoryID,
+		})
+	}
 
 	m.logger.Info("created Matrix room",
 		slog.String("matrix_room", string(roomID)),
@@ -1023,9 +1205,30 @@ func (m *Manager) addToGuildSpace(ctx context.Context, roomID id.RoomID, categor
 func (m *Manager) DiscoverExistingRooms(ctx context.Context) error {
 	intent := m.signaller.BotIntent()
 	if err := intent.EnsureRegistered(ctx); err != nil {
-		m.logger.Warn("bot registration (may already exist)", slog.Any("err", err))
+		m.logger.Debug("bot registration (may already exist)", slog.Any("err", err))
 	}
 
+	// Try DB first — fast path
+	if m.store != nil {
+		rooms, err := m.store.ListRooms(m.guildID)
+		if err == nil && len(rooms) > 0 {
+			m.mu.Lock()
+			for _, r := range rooms {
+				roomID := id.RoomID(r.MatrixRoom)
+				m.channelRooms[r.DiscordChannel] = roomID
+				m.roomChannels[roomID] = r.DiscordChannel
+				if r.Name != "" {
+					m.channelInfos[r.DiscordChannel] = channelInfo{name: r.Name, categoryID: r.CategoryID}
+				}
+			}
+			m.mu.Unlock()
+			m.logger.Info("loaded rooms from database", slog.Int("found", len(rooms)))
+			return nil
+		}
+	}
+
+	// Fallback: scan Matrix state events (slow, parallel)
+	m.logger.Info("no rooms in database, scanning Matrix state events")
 	resp, err := intent.Client.JoinedRooms(ctx)
 	if err != nil {
 		return fmt.Errorf("list joined rooms: %w", err)
@@ -1039,7 +1242,6 @@ func (m *Manager) DiscoverExistingRooms(ctx context.Context) error {
 		roomID    id.RoomID
 	}
 
-	// Check rooms in parallel (up to 10 concurrent)
 	results := make(chan result, len(resp.JoinedRooms))
 	sem := make(chan struct{}, 10)
 	var wg sync.WaitGroup
@@ -1097,12 +1299,17 @@ func (m *Manager) DiscoverExistingRooms(ctx context.Context) error {
 		m.roomChannels[r.roomID] = r.channelID
 		m.mu.Unlock()
 		discovered++
-		m.logger.Info("discovered existing voice room",
-			slog.Uint64("discord_channel", r.channelID),
-			slog.String("matrix_room", string(r.roomID)),
-		)
+
+		// Persist to DB for next startup
+		if m.store != nil {
+			_ = m.store.UpsertRoom(store.Room{
+				DiscordChannel: r.channelID,
+				MatrixRoom:     string(r.roomID),
+				GuildID:        m.guildID,
+			})
+		}
 	}
 
-	m.logger.Info("room discovery complete", slog.Int("found", discovered))
+	m.logger.Info("room discovery complete (Matrix scan)", slog.Int("found", discovered))
 	return nil
 }
