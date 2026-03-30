@@ -19,10 +19,30 @@ import (
 	mx "github.com/lukacsi/livekit-discord-bridge/pkg/matrix"
 )
 
+// LevelTrace is a custom slog level below Debug for per-frame verbosity.
+const LevelTrace = slog.Level(-8)
+
+func parseLogLevel(s string) slog.Level {
+	switch s {
+	case "trace":
+		return LevelTrace
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
+	logLevel := flag.String("log-level", "", "log level: info, debug, trace")
 	flag.Parse()
 
+	// Start with INFO, reconfigure after config is loaded
 	handler := &filterHandler{
 		inner: slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}),
 	}
@@ -33,6 +53,27 @@ func main() {
 	if err != nil {
 		logger.Error("config error", slog.Any("err", err))
 		os.Exit(1)
+	}
+
+	// Flag overrides config
+	if *logLevel != "" {
+		cfg.LogLevel = *logLevel
+	}
+	if cfg.LogLevel != "" {
+		level := parseLogLevel(cfg.LogLevel)
+		handler = &filterHandler{
+			inner: slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+				Level: level,
+				ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+					if a.Key == slog.LevelKey && a.Value.Any().(slog.Level) == LevelTrace {
+						a.Value = slog.StringValue("TRACE")
+					}
+					return a
+				},
+			}),
+		}
+		logger = slog.New(handler)
+		slog.SetDefault(logger)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -77,7 +118,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config.Config) error {
 		}
 		servers = append(servers, srv)
 
-		cmd, err := ipc.StartSidecar(cfg.Sidecar.Dir, socketPath, token, cfg.Discord.GuildID, primary)
+		cmd, err := ipc.StartSidecar(cfg.Sidecar.Dir, socketPath, token, cfg.Discord.GuildID, cfg.LogLevel, primary, i)
 		if err != nil {
 			srv.Close()
 			return fmt.Errorf("sidecar %d: %w", i, err)

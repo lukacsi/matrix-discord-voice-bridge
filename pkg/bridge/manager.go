@@ -141,7 +141,7 @@ func (m *Manager) HandleMessage(ctx context.Context, slotIdx int, msg *ipc.Messa
 			m.mu.Unlock()
 			if _, err := m.ensureMatrixRoom(ctx, channelID, info); err != nil {
 				m.logger.Warn("failed to pre-create room",
-					slog.Uint64("channel", channelID),
+					slog.Uint64("discord_channel", channelID),
 					slog.String("name", name),
 					slog.Any("err", err),
 				)
@@ -187,7 +187,7 @@ func (m *Manager) HandleMessage(ctx context.Context, slotIdx int, msg *ipc.Messa
 		m.mu.Unlock()
 		if bridge != nil {
 			m.logger.Warn("sidecar reported channel leave",
-				slog.Uint64("channel", bridge.ChannelID), slog.Int("slot", slotIdx))
+				slog.Uint64("discord_channel", bridge.ChannelID), slog.Int("slot", slotIdx))
 			go m.stopBridgeForChannel(ctx, bridge.ChannelID)
 		}
 		return true
@@ -198,7 +198,7 @@ func (m *Manager) HandleMessage(ctx context.Context, slotIdx int, msg *ipc.Messa
 		m.mu.Unlock()
 		if bridge != nil {
 			if err := bridge.LKManager.WriteOpus(msg.UserID, msg.Payload); err != nil {
-				m.logger.Debug("WriteOpus error", slog.Uint64("user", msg.UserID), slog.Any("err", err))
+				m.logger.Debug("WriteOpus error", slog.Uint64("discord_user", msg.UserID), slog.Any("err", err))
 			}
 		}
 		return true
@@ -239,7 +239,7 @@ func (m *Manager) onVoiceState(ctx context.Context, userID, channelID uint64) {
 	if oldChannel != 0 && oldChannel != channelID {
 		if err := m.signaller.LeaveCall(ctx, userID); err != nil {
 			m.logger.Warn("failed to remove presence",
-				slog.Uint64("user", userID),
+				slog.Uint64("discord_user", userID),
 				slog.Any("err", err),
 			)
 		}
@@ -253,16 +253,16 @@ func (m *Manager) onVoiceState(ctx context.Context, userID, channelID uint64) {
 		if room != "" {
 			if err := m.signaller.JoinCall(ctx, userID, room); err != nil {
 				m.logger.Warn("failed to signal presence",
-					slog.Uint64("user", userID),
+					slog.Uint64("discord_user", userID),
 					slog.Any("err", err),
 				)
 			}
 		}
 	}
 
-	m.logger.Info("voice state",
-		slog.Uint64("user", userID),
-		slog.Uint64("channel", channelID),
+	m.logger.Debug("voice state",
+		slog.Uint64("discord_user", userID),
+		slog.Uint64("discord_channel", channelID),
 	)
 }
 
@@ -287,7 +287,7 @@ func (m *Manager) startBridge(ctx context.Context, channelID uint64) {
 	if slotIdx == -1 {
 		m.mu.Unlock()
 		m.logger.Warn("no free sidecar slot — cannot bridge channel",
-			slog.Uint64("channel", channelID),
+			slog.Uint64("discord_channel", channelID),
 			slog.Int("total_slots", len(m.slots)),
 		)
 		return
@@ -299,7 +299,7 @@ func (m *Manager) startBridge(ctx context.Context, channelID uint64) {
 	if matrixRoomID == "" {
 		slot.channelID = 0 // release slot
 		m.mu.Unlock()
-		m.logger.Error("no Matrix room for channel", slog.Uint64("channel", channelID))
+		m.logger.Error("no Matrix room for channel", slog.Uint64("discord_channel", channelID))
 		return
 	}
 
@@ -351,7 +351,7 @@ func (m *Manager) startBridge(ctx context.Context, channelID uint64) {
 	m.mu.Unlock()
 
 	m.logger.Info("started bridge",
-		slog.Uint64("channel", channelID),
+		slog.Uint64("discord_channel", channelID),
 		slog.String("matrix_room", string(matrixRoomID)),
 		slog.Int("slot", slotIdx),
 	)
@@ -394,7 +394,7 @@ func (m *Manager) stopBridgeForChannel(ctx context.Context, channelID uint64) {
 	}
 
 	m.logger.Info("stopped bridge",
-		slog.Uint64("channel", bridge.ChannelID),
+		slog.Uint64("discord_channel", bridge.ChannelID),
 		slog.Int("slot", bridge.SlotIndex),
 	)
 }
@@ -484,9 +484,9 @@ func (m *Manager) OnMatrixCallMember(ctx context.Context, roomID id.RoomID, user
 
 		if !alreadyTracked {
 			m.logger.Info("matrix user joined voice room",
-				slog.String("user", userMXID),
-				slog.String("room", string(roomID)),
-				slog.Uint64("channel", channelID),
+				slog.String("matrix_user", userMXID),
+				slog.String("matrix_room", string(roomID)),
+				slog.Uint64("discord_channel", channelID),
 			)
 			m.startBridge(ctx, channelID)
 			m.pushMatrixUsers(channelID)
@@ -503,9 +503,9 @@ func (m *Manager) OnMatrixCallMember(ctx context.Context, roomID id.RoomID, user
 		m.mu.Unlock()
 
 		m.logger.Info("matrix user left voice room",
-			slog.String("user", userMXID),
-			slog.String("room", string(roomID)),
-			slog.Uint64("channel", channelID),
+			slog.String("matrix_user", userMXID),
+			slog.String("matrix_room", string(roomID)),
+			slog.Uint64("discord_channel", channelID),
 		)
 
 		m.pushMatrixUsers(channelID)
@@ -669,7 +669,7 @@ func (m *Manager) ensureMatrixRoom(ctx context.Context, channelID uint64, info c
 	m.mu.Unlock()
 
 	m.logger.Info("created Matrix room",
-		slog.String("room", string(roomID)),
+		slog.String("matrix_room", string(roomID)),
 		slog.String("name", roomName),
 	)
 
@@ -700,7 +700,7 @@ func (m *Manager) ensureMatrixRoom(ctx context.Context, channelID uint64, info c
 		}, bridgeStateKey, bridgeContent); err != nil {
 			m.logger.Warn("failed to set bridge info",
 				slog.String("type", evtType),
-				slog.String("room", string(roomID)),
+				slog.String("matrix_room", string(roomID)),
 				slog.Any("err", err),
 			)
 		}
@@ -751,14 +751,14 @@ func (m *Manager) discoverGuildSpace(ctx context.Context) (id.RoomID, error) {
 		var createContent map[string]interface{}
 		if err := botIntent.StateEvent(ctx, roomID, event.Type{Type: "m.room.create", Class: event.StateEventType}, "", &createContent); err != nil {
 			m.logger.Warn("room has bridge info but can't read create event",
-				slog.String("room", string(roomID)),
+				slog.String("matrix_room", string(roomID)),
 				slog.Any("err", err),
 			)
 			continue
 		}
 		if createContent["type"] != "m.space" {
 			m.logger.Debug("room has bridge info but is not a Space",
-				slog.String("room", string(roomID)),
+				slog.String("matrix_room", string(roomID)),
 			)
 			continue
 		}
@@ -766,7 +766,7 @@ func (m *Manager) discoverGuildSpace(ctx context.Context) (id.RoomID, error) {
 		m.guildSpace = roomID
 		m.mu.Unlock()
 		m.logger.Info("discovered guild Space",
-			slog.String("room", string(roomID)),
+			slog.String("matrix_room", string(roomID)),
 			slog.String("guild", m.guildID),
 		)
 		return roomID, nil
@@ -846,7 +846,7 @@ func (m *Manager) discoverCategorySpaces(ctx context.Context) {
 			m.mu.Unlock()
 			m.logger.Info("discovered category Space",
 				slog.Uint64("category", catID),
-				slog.String("room", string(childRoomID)),
+				slog.String("matrix_room", string(childRoomID)),
 			)
 		}
 	}
@@ -901,7 +901,7 @@ func (m *Manager) addToGuildSpace(ctx context.Context, roomID id.RoomID, categor
 	})
 	if err != nil {
 		m.logger.Warn("failed to add room to Space",
-			slog.String("room", string(roomID)),
+			slog.String("matrix_room", string(roomID)),
 			slog.String("space", string(targetSpace)),
 			slog.Any("err", err),
 		)
@@ -918,13 +918,13 @@ func (m *Manager) addToGuildSpace(ctx context.Context, roomID id.RoomID, categor
 	})
 	if err != nil {
 		m.logger.Warn("failed to set parent Space on voice room",
-			slog.String("room", string(roomID)),
+			slog.String("matrix_room", string(roomID)),
 			slog.Any("err", err),
 		)
 	}
 
 	m.logger.Info("added room to Space",
-		slog.String("room", string(roomID)),
+		slog.String("matrix_room", string(roomID)),
 		slog.String("space", string(targetSpace)),
 		slog.Uint64("category", categoryID),
 	)
@@ -1012,8 +1012,8 @@ func (m *Manager) DiscoverExistingRooms(ctx context.Context) error {
 		m.mu.Unlock()
 		discovered++
 		m.logger.Info("discovered existing voice room",
-			slog.Uint64("channel", r.channelID),
-			slog.String("room", string(r.roomID)),
+			slog.Uint64("discord_channel", r.channelID),
+			slog.String("matrix_room", string(r.roomID)),
 		)
 	}
 

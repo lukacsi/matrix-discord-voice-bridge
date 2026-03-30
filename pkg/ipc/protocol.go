@@ -154,13 +154,15 @@ func (s *Server) Close() error {
 // StartSidecar launches the Node.js sidecar process.
 // If primary is true, the sidecar watches voice states and sends channel lists.
 // Non-primary sidecars only handle audio bridging (JOIN/LEAVE/audio).
-func StartSidecar(sidecarDir, socketPath, token, guildID string, primary bool) (*exec.Cmd, error) {
+func StartSidecar(sidecarDir, socketPath, token, guildID, logLevel string, primary bool, slotIndex int) (*exec.Cmd, error) {
 	cmd := exec.Command("node", "index.mjs")
 	cmd.Dir = sidecarDir
 	env := append(os.Environ(),
 		"IPC_SOCKET_PATH="+socketPath,
 		"DISCORD_BOT_TOKEN="+token,
 		"DISCORD_GUILD_ID="+guildID,
+		"SIDECAR_LOG_LEVEL="+logLevel,
+		fmt.Sprintf("SIDECAR_SLOT=%d", slotIndex),
 	)
 	if primary {
 		env = append(env, "SIDECAR_PRIMARY=true")

@@ -158,7 +158,7 @@ func NewSubscriber(config Config, handler OpusFrameHandler, slogger *slog.Logger
 	}
 
 	s.room = room
-	slogger.Info("subscriber connected to LiveKit room", slog.String("room", config.RoomName))
+	slogger.Info("subscriber connected to LiveKit room", slog.String("livekit_room", config.RoomName))
 	return s, nil
 }
 

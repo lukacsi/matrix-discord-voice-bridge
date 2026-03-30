@@ -35,7 +35,7 @@ func main() {
 	}
 	defer srv.Close()
 
-	cmd, err := ipc.StartSidecar("sidecar", socketPath, token, guildID, true)
+	cmd, err := ipc.StartSidecar("sidecar", socketPath, token, guildID, "info", true, 0)
 	if err != nil {
 		logger.Error("failed to start sidecar", slog.Any("err", err))
 		os.Exit(1)

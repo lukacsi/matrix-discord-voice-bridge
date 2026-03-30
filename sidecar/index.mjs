@@ -28,6 +28,15 @@ const MSG_MATRIX_USERS = 0x0c;
 
 const SIDECAR_USER_ID = '0';
 const PRIMARY = process.env.SIDECAR_PRIMARY === 'true';
+const LOG_LEVEL = process.env.SIDECAR_LOG_LEVEL || 'info';
+const SLOT = process.env.SIDECAR_SLOT || '0';
+const PREFIX = `[sidecar:${SLOT}]`;
+
+function logDebug(...args) { if (LOG_LEVEL === 'debug' || LOG_LEVEL === 'trace') console.log(PREFIX, ...args); }
+function logTrace(...args) { if (LOG_LEVEL === 'trace') console.log(PREFIX, ...args); }
+function logInfo(...args) { console.log(PREFIX, ...args); }
+function logWarn(...args) { console.warn(PREFIX, ...args); }
+function logError(...args) { console.error(PREFIX, ...args); }
 
 const SOCKET_PATH = process.env.IPC_SOCKET_PATH || '/tmp/discord-voice-bridge.sock';
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
@@ -40,7 +49,14 @@ if (!TOKEN || !GUILD_ID) {
 
 // --- IPC Protocol ---
 
+const MSG_TYPE_NAMES = {
+  0x01: 'AUDIO_FROM', 0x02: 'AUDIO_TO', 0x03: 'USER_JOIN', 0x04: 'USER_LEAVE',
+  0x05: 'READY', 0x06: 'SHUTDOWN', 0x07: 'JOIN_CH', 0x08: 'LEAVE_CH',
+  0x09: 'VOICE_STATE', 0x0a: 'CH_LIST', 0x0b: 'USER_INFO', 0x0c: 'MX_USERS',
+};
+
 function writeMessage(socket, type, userId, payload) {
+  logTrace(`ipc send ${MSG_TYPE_NAMES[type] || type} user=${userId} len=${payload?.length || 0}`);
   const userBuf = Buffer.alloc(8);
   userBuf.writeBigUInt64LE(BigInt(userId));
   const payloadBuf = payload || Buffer.alloc(0);
@@ -107,6 +123,7 @@ class IPCReader {
       const userId = this.buffer.readBigUInt64LE(1).toString();
       const payload = this.buffer.subarray(11, totalLen);
 
+      logTrace(`ipc recv ${MSG_TYPE_NAMES[type] || type} user=${userId} len=${payload.length}`);
       this.onMessage(type, userId, payload);
       this.buffer = this.buffer.subarray(totalLen);
     }
@@ -198,7 +215,7 @@ function updateBotNickname(payload) {
   const truncated = newNick.length > 32 ? newNick.substring(0, 29) + '...' : newNick;
 
   me.setNickname(truncated).catch((err) => {
-    console.error(`[sidecar] failed to set nickname: ${err.message}`);
+    logError(` failed to set nickname: ${err.message}`);
   });
 }
 
@@ -222,7 +239,7 @@ async function main() {
       if (!connected) {
         reject(err);
       } else {
-        console.error(`[sidecar] IPC socket error: ${err.message}`);
+        logError(` IPC socket error: ${err.message}`);
         cleanup();
       }
     });
@@ -230,18 +247,18 @@ async function main() {
 
   const ipcReader = new IPCReader((type, _userId, payload) => {
     if (type === MSG_SHUTDOWN) {
-      console.log('[sidecar] received shutdown');
+      logInfo('received shutdown');
       cleanup();
     } else if (type === MSG_AUDIO_TO_DISCORD && opusStream) {
       opusStream.pushFrame(Buffer.from(payload));
     } else if (type === MSG_JOIN_CHANNEL) {
       const channelId = readChannelId(payload);
       if (channelId) {
-        console.log(`[sidecar] JOIN_CHANNEL ${channelId}`);
+        logDebug(`JOIN_CHANNEL ${channelId}`);
         joinChannel(channelId);
       }
     } else if (type === MSG_LEAVE_CHANNEL) {
-      console.log('[sidecar] LEAVE_CHANNEL');
+      logDebug('LEAVE_CHANNEL');
       leaveChannel();
     } else if (type === MSG_MATRIX_USERS) {
       updateBotNickname(payload);
@@ -256,7 +273,7 @@ async function main() {
 
   // Login to Discord
   await discordClient.login(TOKEN);
-  console.log(`[sidecar] logged in as ${discordClient.user.tag}`);
+  logInfo(` logged in as ${discordClient.user.tag}`);
 
   await new Promise((resolve) => {
     if (discordClient.isReady()) return resolve();
@@ -296,7 +313,7 @@ async function main() {
       const payload = voiceStatePayload(channel.id, channel.name, channel.parentId || '0');
       writeMessage(ipcSocket, MSG_CHANNEL_LIST, SIDECAR_USER_ID, payload);
     }
-    console.log(`[sidecar] primary: sent ${voiceChannels.size} voice channels`);
+    logInfo(` primary: sent ${voiceChannels.size} voice channels`);
 
     // Send initial voice states + user info
     for (const [, state] of guild.voiceStates.cache) {
@@ -316,7 +333,7 @@ async function main() {
   const startTime = Date.now();
   statsInterval = setInterval(() => {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
-    console.log(`[sidecar] ${elapsed}s uptime, frames: ${frameCount}, channel: ${currentChannelId || 'none'}`);
+    logInfo(` ${elapsed}s uptime, frames: ${frameCount}, channel: ${currentChannelId || 'none'}`);
   }, 60_000);
 }
 
@@ -353,14 +370,14 @@ async function joinChannel(channelId) {
     });
 
     connection.on('error', (err) => {
-      console.error(`[sidecar] voice connection error: ${err.message}`);
+      logError(` voice connection error: ${err.message}`);
       leaveChannel();
     });
 
     try {
       await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
     } catch (err) {
-      console.error(`[sidecar] join attempt ${attempt}/${maxRetries} failed for ${channelId}: ${err.message}`);
+      logError(` join attempt ${attempt}/${maxRetries} failed for ${channelId}: ${err.message}`);
       try { connection.destroy(); } catch (_) {}
       currentChannelId = null;
       if (attempt < maxRetries) {
@@ -380,12 +397,12 @@ async function joinChannel(channelId) {
   if (!currentConnection) return;
 
   currentConnection = connection;
-  console.log(`[sidecar] joined voice channel ${channelId}`);
+  logInfo(` joined voice channel ${channelId}`);
 
   // Now that connection is Ready, watch for unexpected disconnects
   connection.on('stateChange', (_oldState, newState) => {
     if (newState.status === VoiceConnectionStatus.Disconnected) {
-      console.warn('[sidecar] voice connection disconnected, cleaning up');
+      logWarn(' voice connection disconnected, cleaning up');
       leaveChannel();
     }
   });
@@ -409,7 +426,7 @@ async function joinChannel(channelId) {
     writeMessage(ipcSocket, MSG_USER_JOIN, userId, null);
 
     if (!receiver.subscriptions.has(userId)) {
-      console.log(`[sidecar] subscribing to user ${userId}`);
+      logInfo(` subscribing to user ${userId}`);
       const stream = receiver.subscribe(userId, { end: { behavior: 0 } });
 
       stream.on('data', (opusFrame) => {
@@ -418,12 +435,12 @@ async function joinChannel(channelId) {
       });
 
       stream.on('error', (err) => {
-        console.error(`[sidecar] stream error for ${userId}: ${err.message}`);
+        logError(` stream error for ${userId}: ${err.message}`);
       });
 
       stream.on('close', () => {
         writeMessage(ipcSocket, MSG_USER_LEAVE, userId, null);
-        console.log(`[sidecar] user ${userId} stream closed`);
+        logInfo(` user ${userId} stream closed`);
       });
     }
   });
@@ -446,7 +463,7 @@ function leaveChannel() {
     opusStream = null;
   }
   if (currentChannelId) {
-    console.log(`[sidecar] left voice channel ${currentChannelId}`);
+    logInfo(` left voice channel ${currentChannelId}`);
     currentChannelId = null;
   }
   frameCount = 0;
@@ -473,7 +490,7 @@ function cleanup() {
 process.on('SIGINT', () => cleanup());
 process.on('SIGTERM', () => cleanup());
 process.on('unhandledRejection', (err) => {
-  console.error(`[sidecar] unhandled rejection: ${err}`);
+  logError(` unhandled rejection: ${err}`);
 });
 
 main().catch((err) => {

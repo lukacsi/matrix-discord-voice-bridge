@@ -123,7 +123,8 @@ func (s *Signaller) JoinCall(ctx context.Context, discordUserID uint64, roomID i
 
 	regCtx, regCancel := context.WithTimeout(ctx, 10*time.Second)
 	if err := intent.EnsureRegistered(regCtx); err != nil {
-		s.logger.Warn("user registration (may already exist)", slog.Any("err", err))
+		s.logger.Debug("user registration (may already exist)",
+			slog.String("matrix_user", string(mxid)), slog.Any("err", err))
 	}
 	regCancel()
 
@@ -172,8 +173,8 @@ func (s *Signaller) JoinCall(ctx context.Context, discordUserID uint64, roomID i
 	s.mu.Unlock()
 
 	s.logger.Info("joined call",
-		slog.String("mxid", string(mxid)),
-		slog.String("room", string(roomID)),
+		slog.String("matrix_user", string(mxid)),
+		slog.String("matrix_room", string(roomID)),
 	)
 	return nil
 }
@@ -200,8 +201,8 @@ func (s *Signaller) LeaveCall(ctx context.Context, discordUserID uint64) error {
 	}
 
 	s.logger.Info("left call",
-		slog.String("mxid", string(info.mxid)),
-		slog.String("room", string(info.roomID)),
+		slog.String("matrix_user", string(info.mxid)),
+		slog.String("matrix_room", string(info.roomID)),
 	)
 	return nil
 }
@@ -218,7 +219,7 @@ func (s *Signaller) LeaveAll(ctx context.Context) {
 	for _, id := range ids {
 		if err := s.LeaveCall(ctx, id); err != nil {
 			s.logger.Warn("failed to leave call on shutdown",
-				slog.Uint64("user", id),
+				slog.Uint64("discord_user", id),
 				slog.Any("err", err),
 			)
 		}
@@ -254,12 +255,12 @@ func (s *Signaller) EnsureProfile(ctx context.Context, discordUserID uint64, dis
 	if displayName != "" {
 		if err := intent.SetDisplayName(ctx, displayName); err != nil {
 			s.logger.Warn("failed to set display name",
-				slog.String("mxid", string(mxid)),
+				slog.String("matrix_user", string(mxid)),
 				slog.Any("err", err),
 			)
 		} else {
 			s.logger.Info("set puppet display name",
-				slog.String("mxid", string(mxid)),
+				slog.String("matrix_user", string(mxid)),
 				slog.String("name", displayName),
 			)
 		}
@@ -410,7 +411,7 @@ func (s *Signaller) StartRenewal(ctx context.Context) {
 						Class: event.StateEventType,
 					}, info.stateKey, content); err != nil {
 						s.logger.Warn("failed to renew membership",
-							slog.String("mxid", string(info.mxid)),
+							slog.String("matrix_user", string(info.mxid)),
 							slog.Any("err", err),
 						)
 					}

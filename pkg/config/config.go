@@ -9,10 +9,11 @@ import (
 )
 
 type Config struct {
-	Discord Discord `yaml:"discord"`
-	LiveKit LiveKit `yaml:"livekit"`
-	Matrix  Matrix  `yaml:"matrix"`
-	Sidecar Sidecar `yaml:"sidecar"`
+	Discord  Discord `yaml:"discord"`
+	LiveKit  LiveKit `yaml:"livekit"`
+	Matrix   Matrix  `yaml:"matrix"`
+	Sidecar  Sidecar `yaml:"sidecar"`
+	LogLevel string  `yaml:"log_level"` // info (default), debug, trace
 }
 
 type Discord struct {
@@ -82,6 +83,7 @@ func Load(path string) (*Config, error) {
 	envOverride(&cfg.Matrix.LKJWTService, "LK_JWT_SERVICE_URL")
 	envOverride(&cfg.Sidecar.Dir, "SIDECAR_DIR")
 	envOverride(&cfg.Sidecar.SocketPath, "IPC_SOCKET_PATH")
+	envOverride(&cfg.LogLevel, "BRIDGE_LOG_LEVEL")
 
 	// DISCORD_BOT_TOKENS env var: comma-separated list
 	if v := os.Getenv("DISCORD_BOT_TOKENS"); v != "" {

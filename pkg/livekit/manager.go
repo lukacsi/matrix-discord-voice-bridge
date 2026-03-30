@@ -162,7 +162,7 @@ func (m *Manager) WriteOpus(userID uint64, opusFrame []byte) error {
 		go func() {
 			if err := m.ensureParticipant(userID); err != nil {
 				m.logger.Warn("failed to create LiveKit participant",
-					slog.Uint64("user", userID), slog.Any("err", err))
+					slog.Uint64("discord_user", userID), slog.Any("err", err))
 			}
 		}()
 		return nil // drop first frame
