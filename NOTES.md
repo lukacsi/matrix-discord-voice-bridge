@@ -1,5 +1,26 @@
 # Notes — livekit-discord-bridge
 
+## 2026-03-31 — SQLite, hot bot management, Dockerfile, CI/CD
+
+**Context:** Bridge needed persistent state, runtime bot management, and containerized deployment.
+
+**Decisions:**
+- `modernc.org/sqlite` (pure Go, no CGo) with WAL mode for concurrent reads
+- DB is source of truth for rooms and bots; Matrix state scan as fallback for fresh DB
+- Single container: Go binary + Node.js sidecar (shared /data volume for DB)
+- Helm chart with Secret for config, PVC for data persistence
+- CI runs tests on push; release builds Docker + pushes Helm OCI on git tag
+
+**Done:**
+- `pkg/store`: SQLite persistence for bots, rooms, guilds (84% test coverage)
+- !bot-add / !bot-remove via Matrix DM — hot sidecar lifecycle + DB persistence
+- !sync-db — rebuild DB from Matrix state events
+- DiscoverExistingRooms: DB-first (instant startup), Matrix fallback
+- Dockerfile: multi-stage (Go 1.26 + Node 22), /data volume
+- Helm chart: deployment, secret, PVC, configurable values
+- GitHub Actions: ci.yaml (test), release.yaml (Docker + Helm OCI publish)
+- Two review rounds fixing concurrency (slot races, sentinel panic, lock ordering)
+
 ## 2026-03-30 — Resilience, logging, DM commands
 
 **Context:** Bridge was functional but fragile — no timeouts, silent failures, inconsistent logs, no runtime control.
