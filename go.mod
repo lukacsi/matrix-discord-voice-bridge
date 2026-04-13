@@ -10,7 +10,7 @@ require (
 	gopkg.in/hraban/opus.v2 v2.0.0-20230925203106-0188a62cb302
 	gopkg.in/yaml.v3 v3.0.1
 	maunium.net/go/mautrix v0.26.4
-	modernc.org/sqlite v1.48.0
+	modernc.org/sqlite v1.48.2
 )
 
 require (
