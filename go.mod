@@ -4,7 +4,7 @@ go 1.26.1
 
 require (
 	github.com/livekit/media-sdk v0.0.0-20251106223430-dd8f5e0de2cf
-	github.com/livekit/protocol v1.45.1
+	github.com/livekit/protocol v1.45.3
 	github.com/livekit/server-sdk-go/v2 v2.16.1
 	github.com/pion/webrtc/v4 v4.2.11
 	gopkg.in/hraban/opus.v2 v2.0.0-20230925203106-0188a62cb302
@@ -31,7 +31,7 @@ require (
 	github.com/frostbyte73/core v0.1.1 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/gammazero/deque v1.2.1 // indirect
-	github.com/go-jose/go-jose/v3 v3.0.4 // indirect
+	github.com/go-jose/go-jose/v3 v3.0.5 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/cel-go v0.27.0 // indirect
