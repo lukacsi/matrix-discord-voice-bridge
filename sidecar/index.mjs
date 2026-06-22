@@ -400,11 +400,10 @@ async function joinChannel(channelId) {
 
   if (!currentConnection) return;
 
-  currentConnection = connection;
   logInfo(` joined voice channel ${channelId}`);
 
   // Now that connection is Ready, watch for unexpected disconnects
-  connection.on('stateChange', (_oldState, newState) => {
+  currentConnection.on('stateChange', (_oldState, newState) => {
     if (newState.status === VoiceConnectionStatus.Disconnected) {
       logWarn(' voice connection disconnected, cleaning up');
       leaveChannel();
