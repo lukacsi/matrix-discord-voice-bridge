@@ -1,10 +1,13 @@
 # Stage 1: Build Go binary
 FROM golang:1.26-bookworm AS go-builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libopus-dev libopusfile-dev libsoxr-dev gcc pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /bridge ./cmd/bridge
+RUN CGO_ENABLED=1 go build -o /bridge ./cmd/bridge
 
 # Stage 2: Install Node.js sidecar dependencies
 FROM node:22-bookworm AS node-builder
@@ -15,7 +18,9 @@ RUN npm ci --omit=dev
 
 # Stage 3: Runtime
 FROM node:22-bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libopus0 libsoxr0 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
